@@ -1,0 +1,184 @@
+"""Locating and declaring the shared library. Nothing public lives here."""
+
+from __future__ import annotations
+
+import ctypes as C
+import os
+import sys
+from ctypes.util import find_library
+from pathlib import Path
+
+_SUFFIX = {"darwin": ".dylib", "win32": ".dll"}.get(sys.platform, ".so")
+_NAME = ("qnnt_c" if sys.platform != "win32" else "qnnt_c")
+
+
+class Error(Exception):
+    """A qnnt call failed. Carries the numeric status alongside the message."""
+
+    def __init__(self, status: int, name: str, context: str = "") -> None:
+        super().__init__(f"{context}: {name}" if context else name)
+        self.status = status
+        self.status_name = name
+
+
+def _candidates() -> list[Path]:
+    """Where to look, most explicit first."""
+    found: list[Path] = []
+
+    override = os.environ.get("QNNT_LIBRARY")
+    if override:
+        found.append(Path(override))
+
+    here = Path(__file__).resolve().parent
+    # Bundled inside the package, which is how a wheel ships it.
+    found.append(here / "_lib" / f"lib{_NAME}{_SUFFIX}")
+    # Built in place, for working against a checkout.
+    found.append(here.parents[1] / "zig-out" / "lib" / f"lib{_NAME}{_SUFFIX}")
+
+    system = find_library(_NAME)
+    if system:
+        found.append(Path(system))
+
+    return found
+
+
+def load() -> C.CDLL:
+    tried = _candidates()
+    for path in tried:
+        if path.exists() or not path.is_absolute():
+            try:
+                return C.CDLL(str(path))
+            except OSError:
+                continue
+    raise Error(
+        -1,
+        "library not found",
+        "looked in " + ", ".join(str(p) for p in tried) + " (set QNNT_LIBRARY to override)",
+    )
+
+
+class Message(C.Structure):
+    _fields_ = [
+        ("topic", C.POINTER(C.c_char)),
+        ("topic_len", C.c_size_t),
+        ("data", C.POINTER(C.c_uint8)),
+        ("data_len", C.c_size_t),
+        ("received_us", C.c_uint64),
+    ]
+
+
+class Frame(C.Structure):
+    _fields_ = [
+        ("type", C.c_uint8),
+        ("mod", C.c_uint8),
+        ("ext_code", C.c_int16),
+        ("data", C.POINTER(C.c_uint8)),
+        ("data_len", C.c_size_t),
+        ("raw", C.POINTER(C.c_uint8)),
+        ("raw_len", C.c_size_t),
+    ]
+
+
+class Iter(C.Structure):
+    _fields_ = [("rest", C.POINTER(C.c_uint8)), ("rest_len", C.c_size_t)]
+
+
+def declare(lib: C.CDLL) -> C.CDLL:
+    """Pin argtypes/restypes so ctypes converts rather than guessing.
+
+    Without this, a Python int passed where the ABI wants uint64 is truncated to 32 bits
+    on some platforms, silently.
+    """
+    sig = lib.qnnt_status_name
+    sig.argtypes, sig.restype = [C.c_int], C.c_char_p
+
+    lib.qnnt_set_registry_port.argtypes = [C.c_uint16]
+    lib.qnnt_set_registry_port.restype = C.c_int
+    lib.qnnt_registry_port.argtypes, lib.qnnt_registry_port.restype = [], C.c_uint16
+
+    lib.qnnt_init.argtypes, lib.qnnt_init.restype = [], C.c_int
+    lib.qnnt_deinit.argtypes, lib.qnnt_deinit.restype = [], None
+    lib.qnnt_install_signal_handlers.argtypes = []
+    lib.qnnt_stop_requested.argtypes, lib.qnnt_stop_requested.restype = [], C.c_bool
+    lib.qnnt_now_micros.argtypes, lib.qnnt_now_micros.restype = [], C.c_int64
+    lib.qnnt_sleep_ms.argtypes = [C.c_uint64]
+
+    lib.qnnt_publisher_start.argtypes = [C.c_char_p, C.c_size_t, C.c_void_p, C.c_uint64, C.c_void_p]
+    lib.qnnt_publisher_start.restype = C.c_int
+    lib.qnnt_publish.argtypes = [C.c_char_p, C.c_size_t, C.c_void_p, C.c_size_t]
+    lib.qnnt_publish.restype = C.c_int
+
+    lib.qnnt_queue_reserve.argtypes, lib.qnnt_queue_reserve.restype = [C.c_size_t], C.c_int
+    lib.qnnt_queue_dropped.argtypes, lib.qnnt_queue_dropped.restype = [], C.c_uint64
+    lib.qnnt_subscribe_queue.argtypes = [C.c_char_p, C.c_size_t, C.c_int]
+    lib.qnnt_subscribe_queue.restype = C.c_int
+    lib.qnnt_poll.argtypes = [C.POINTER(Message), C.c_size_t, C.c_int32, C.POINTER(C.c_size_t)]
+    lib.qnnt_poll.restype = C.c_int
+
+    # --- TLD -------------------------------------------------------------------
+    lib.qnnt_tld_version.argtypes, lib.qnnt_tld_version.restype = [], C.c_char_p
+    lib.qnnt_tld_status_name.argtypes, lib.qnnt_tld_status_name.restype = [C.c_int], C.c_char_p
+
+    lib.qnnt_tld_encoder_create.argtypes, lib.qnnt_tld_encoder_create.restype = [], C.c_void_p
+    lib.qnnt_tld_encoder_destroy.argtypes = [C.c_void_p]
+    lib.qnnt_tld_encoder_reset.argtypes = [C.c_void_p]
+    lib.qnnt_tld_encoder_bytes.argtypes = [C.c_void_p, C.POINTER(C.c_size_t)]
+    lib.qnnt_tld_encoder_bytes.restype = C.POINTER(C.c_uint8)
+
+    for name, extra in (
+        ("qnnt_tld_write_null", []),
+        ("qnnt_tld_write_bool", [C.c_bool]),
+        ("qnnt_tld_write_u64", [C.c_uint64]),
+        ("qnnt_tld_write_i64", [C.c_int64]),
+        ("qnnt_tld_write_f64", [C.c_double]),
+    ):
+        fn = getattr(lib, name)
+        fn.argtypes, fn.restype = [C.c_void_p, *extra], C.c_int
+
+    for name in ("qnnt_tld_write_string", "qnnt_tld_write_buffer"):
+        fn = getattr(lib, name)
+        fn.argtypes, fn.restype = [C.c_void_p, C.c_char_p, C.c_size_t], C.c_int
+
+    for name in ("qnnt_tld_begin_array", "qnnt_tld_begin_object"):
+        fn = getattr(lib, name)
+        fn.argtypes, fn.restype = [C.c_void_p, C.POINTER(C.c_size_t)], C.c_int
+
+    for name in ("qnnt_tld_end_array", "qnnt_tld_end_object"):
+        fn = getattr(lib, name)
+        fn.argtypes, fn.restype = [C.c_void_p, C.c_size_t], C.c_int
+
+    lib.qnnt_tld_decode.argtypes = [C.c_char_p, C.c_size_t, C.POINTER(Frame)]
+    lib.qnnt_tld_decode.restype = C.c_int
+    lib.qnnt_tld_frame_size.argtypes = [C.c_char_p, C.c_size_t, C.POINTER(C.c_size_t)]
+    lib.qnnt_tld_frame_size.restype = C.c_int
+    lib.qnnt_tld_validate.argtypes = [C.c_char_p, C.c_size_t, C.c_size_t]
+    lib.qnnt_tld_validate.restype = C.c_int
+
+    for name in ("qnnt_tld_as_bool",):
+        fn = getattr(lib, name)
+        fn.argtypes, fn.restype = [C.POINTER(Frame), C.POINTER(C.c_bool)], C.c_int
+    lib.qnnt_tld_as_i64.argtypes = [C.POINTER(Frame), C.POINTER(C.c_int64)]
+    lib.qnnt_tld_as_i64.restype = C.c_int
+    lib.qnnt_tld_as_u64.argtypes = [C.POINTER(Frame), C.POINTER(C.c_uint64)]
+    lib.qnnt_tld_as_u64.restype = C.c_int
+    lib.qnnt_tld_as_f64.argtypes = [C.POINTER(Frame), C.POINTER(C.c_double)]
+    lib.qnnt_tld_as_f64.restype = C.c_int
+
+    for name in ("qnnt_tld_as_string", "qnnt_tld_as_buffer"):
+        fn = getattr(lib, name)
+        fn.argtypes = [C.POINTER(Frame), C.POINTER(C.POINTER(C.c_uint8)), C.POINTER(C.c_size_t)]
+        fn.restype = C.c_int
+
+    for name in ("qnnt_tld_array_iter", "qnnt_tld_object_iter"):
+        fn = getattr(lib, name)
+        fn.argtypes, fn.restype = [C.POINTER(Frame), C.POINTER(Iter)], C.c_int
+
+    lib.qnnt_tld_array_next.argtypes = [C.POINTER(Iter), C.POINTER(Frame), C.POINTER(C.c_bool)]
+    lib.qnnt_tld_array_next.restype = C.c_int
+    lib.qnnt_tld_object_next.argtypes = [
+        C.POINTER(Iter), C.POINTER(C.POINTER(C.c_uint8)), C.POINTER(C.c_size_t),
+        C.POINTER(Frame), C.POINTER(C.c_bool),
+    ]
+    lib.qnnt_tld_object_next.restype = C.c_int
+
+    return lib
