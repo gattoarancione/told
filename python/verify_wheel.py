@@ -52,6 +52,10 @@ try:
     env = dict(os.environ)
     env.pop("QNNT_LIBRARY", None)   # must be found inside the package
     env.pop("PYTHONPATH", None)
+    # A registry of its own: the same demo also runs from the source tree, and the build
+    # runs its steps in parallel, so sharing a port would make the two fight over the
+    # registry role.
+    env["QNNT_REGISTRY_PORT"] = "22303"
 
     result = subprocess.run([str(py), str(demo)], cwd=tmp, env=env,
                             capture_output=True, text=True)

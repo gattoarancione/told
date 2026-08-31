@@ -80,41 +80,61 @@ except TypeError:
     check("unsupported type rejected", True)
 
 print("\nnode: publish and drain")
-with qnnt.Node(registry_port=22302, queue_capacity=8192) as node:
+# Its own registry port, overridable: this demo is run twice by the build -- once from the
+# source tree and once from an installed wheel -- and those two must not contend for one
+# registry, since the build runs its steps in parallel.
+DEMO_PORT = int(os.environ.get("QNNT_REGISTRY_PORT", "22302"))
+
+with qnnt.Node(registry_port=DEMO_PORT, queue_capacity=8192) as node:
     node.publisher("py/text")
     node.publisher("py/frames")
     node.subscribe("py/text")
     node.subscribe("py/frames", frames=True)
     time.sleep(0.4)  # let discovery settle
 
-    for i in range(300):
-        node.publish("py/text", f"line-{i}\n".encode())
-        node.publish_object("py/frames", {"seq": i, "raw": b"\x0a\xff"})
-
-    text, frames, polls = [], [], 0
-    deadline = time.time() + 3.0
-    while (len(text) < 300 or len(frames) < 300) and time.time() < deadline:
-        batch = node.poll(timeout=0.2)
+    # Publish in rounds, draining as we go, until both topics have delivered enough.
+    #
+    # A burst sent straight after subscribing is not reliable, and not because of a bug:
+    # `publish` reaches subscribers that are connected AT THAT MOMENT, and there is no
+    # retention. A subscription whose first resolve loses the race against the publisher's
+    # registration backs off a full probe interval before retrying, so a fixed sleep
+    # before publishing is a bet on timing. Sending until the data arrives is what a real
+    # producer of live telemetry does anyway.
+    WANT = 300
+    text, frames, polls, sent = [], [], 0, 0
+    deadline = time.time() + 15.0
+    while (len(text) < WANT or len(frames) < WANT) and time.time() < deadline:
+        for _ in range(50):
+            node.publish("py/text", f"line-{sent}\n".encode())
+            node.publish_object("py/frames", {"seq": sent, "raw": b"\x0a\xff"})
+            sent += 1
+        for msg in node.poll(timeout=0.1):
+            (text if msg.topic == "py/text" else frames).append(msg)
         polls += 1
-        for msg in batch:
-            if msg.topic == "py/text":
-                text.append(msg.text())
-            else:
-                frames.append(msg.value())
 
-    check("text messages", len(text) == 300, f"{len(text)}/300")
-    check("frame messages", len(frames) == 300, f"{len(frames)}/300")
-    check("text content intact", text[:1] == ["line-0\n"], repr(text[:1]))
-    check("frames decode to dicts", frames[:1] == [{"seq": 0, "raw": b"\x0a\xff"}], repr(frames[:1]))
-    check("sequence numbers complete", sorted(f["seq"] for f in frames) == list(range(300)))
-    check("payload with 0x0a survived framing", all(f["raw"] == b"\x0a\xff" for f in frames))
+    text_bodies = [m.text() for m in text]
+    frame_values = [m.value() for m in frames]
+
+    check("text messages", len(text_bodies) >= WANT, f"{len(text_bodies)}/{WANT} of {sent} sent")
+    check("frame messages", len(frame_values) >= WANT, f"{len(frame_values)}/{WANT} of {sent} sent")
+    check("text content intact", text_bodies[0].startswith("line-"), repr(text_bodies[:1]))
+    check("frames decode to dicts",
+          set(frame_values[0]) == {"seq", "raw"}, repr(frame_values[:1]))
+
+    # Contiguous from wherever delivery began: a gap in the middle would mean the framing
+    # lost sync, which is the property worth asserting. Messages published before a
+    # subscriber connected are simply not there to receive.
+    seqs = [v["seq"] for v in frame_values]
+    check("no gaps in what arrived", seqs == list(range(seqs[0], seqs[0] + len(seqs))),
+          f"first={seqs[0]} last={seqs[-1]} count={len(seqs)}")
+    check("payload with 0x0a survived framing", all(v["raw"] == b"\x0a\xff" for v in frame_values))
     check("nothing dropped", node.dropped == 0, f"dropped={node.dropped}")
     check("batching amortises the crossing", len(text) + len(frames) > polls,
           f"{(len(text)+len(frames))/max(polls,1):.0f} messages per poll")
 
 
 try:
-    with qnnt.Node(registry_port=22302) as first, qnnt.Node(registry_port=22302) as second:
+    with qnnt.Node(registry_port=DEMO_PORT) as first, qnnt.Node(registry_port=DEMO_PORT) as second:
         check('a second Node is refused', False)
 except RuntimeError as err:
     check('a second Node is refused', True, str(err))

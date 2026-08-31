@@ -30,10 +30,17 @@ def _candidates() -> list[Path]:
         found.append(Path(override))
 
     here = Path(__file__).resolve().parent
+
+    # A checkout's own build comes first, ahead of the bundled copy. The bundled file is a
+    # build artifact that `zig build wheel` drops in, and it goes stale silently: once it
+    # existed, it shadowed the freshly compiled library and calls failed with dlsym errors
+    # for symbols added since. An installed wheel has no zig-out above it, so it still
+    # loads its bundled copy -- only a checkout is affected, and there the live build is
+    # what you meant.
+    found.append(here.parents[1] / "zig-out" / "lib" / f"lib{_NAME}{_SUFFIX}")
+
     # Bundled inside the package, which is how a wheel ships it.
     found.append(here / "_lib" / f"lib{_NAME}{_SUFFIX}")
-    # Built in place, for working against a checkout.
-    found.append(here.parents[1] / "zig-out" / "lib" / f"lib{_NAME}{_SUFFIX}")
 
     system = find_library(_NAME)
     if system:
@@ -95,6 +102,14 @@ def declare(lib: C.CDLL) -> C.CDLL:
     lib.qnnt_set_registry_port.argtypes = [C.c_uint16]
     lib.qnnt_set_registry_port.restype = C.c_int
     lib.qnnt_registry_port.argtypes, lib.qnnt_registry_port.restype = [], C.c_uint16
+
+    for name in ("qnnt_set_advertise_address", "qnnt_set_bind_address", "qnnt_set_cluster_key"):
+        fn = getattr(lib, name)
+        fn.argtypes, fn.restype = [C.c_char_p], C.c_int
+    lib.qnnt_set_federation_port.argtypes = [C.c_uint16]
+    lib.qnnt_set_federation_port.restype = C.c_int
+    lib.qnnt_add_peer.argtypes = [C.c_char_p, C.c_uint16]
+    lib.qnnt_add_peer.restype = C.c_int
 
     lib.qnnt_init.argtypes, lib.qnnt_init.restype = [], C.c_int
     lib.qnnt_deinit.argtypes, lib.qnnt_deinit.restype = [], None
