@@ -111,6 +111,9 @@ def declare(lib: C.CDLL) -> C.CDLL:
     lib.qnnt_add_peer.argtypes = [C.c_char_p, C.c_uint16]
     lib.qnnt_add_peer.restype = C.c_int
 
+    lib.qnnt_configure_from_environment.argtypes = []
+    lib.qnnt_configure_from_environment.restype = None
+
     lib.qnnt_init.argtypes, lib.qnnt_init.restype = [], C.c_int
     lib.qnnt_deinit.argtypes, lib.qnnt_deinit.restype = [], None
     lib.qnnt_install_signal_handlers.argtypes = []
