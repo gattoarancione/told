@@ -261,6 +261,12 @@ typedef struct qnnt_tld_desc {
     { .key = #member, .offset = offsetof(Type, member), .kind = QNNT_TLD_F_STRUCT,         \
       .size = sizeof(((Type *)0)->member), .nested = (desc_ptr) }
 
+/* A nested struct with an explicit wire key, for when the C member cannot be named after
+ * the field -- a collision with a type name, or a key the other languages already fixed. */
+#define QNNT_TLD_FIELD_AS_STRUCT(Type, member, desc_ptr, wire_key)                        \
+    { .key = (wire_key), .offset = offsetof(Type, member), .kind = QNNT_TLD_F_STRUCT,      \
+      .size = sizeof(((Type *)0)->member), .nested = (desc_ptr) }
+
 /* A fixed-length array of a scalar kind. */
 #define QNNT_TLD_FIELD_ARRAY(Type, member, elem_kind)                                     \
     { .key = #member, .offset = offsetof(Type, member), .kind = QNNT_TLD_F_ARRAY,          \
