@@ -101,6 +101,10 @@ def declare(lib: C.CDLL) -> C.CDLL:
 
     lib.qnnt_set_registry_port.argtypes = [C.c_uint16]
     lib.qnnt_set_registry_port.restype = C.c_int
+    lib.qnnt_set_realtime_priority.argtypes = [C.c_uint8]
+    lib.qnnt_set_realtime_priority.restype = C.c_int
+    lib.qnnt_realtime_priority.argtypes = []
+    lib.qnnt_realtime_priority.restype = C.c_uint8
     lib.qnnt_registry_port.argtypes, lib.qnnt_registry_port.restype = [], C.c_uint16
 
     for name in ("qnnt_set_advertise_address", "qnnt_set_bind_address", "qnnt_set_cluster_key"):
