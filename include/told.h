@@ -159,6 +159,139 @@ qnnt_tld_status qnnt_tld_end_object(qnnt_tld_encoder *enc, size_t mark);
 const char *qnnt_tld_status_name(qnnt_tld_status status);
 const char *qnnt_tld_version(void);
 
+/* ---------------------------------------------------------------- struct mapping
+ *
+ * C has no templates and no reflection, so a struct describes itself once as a table of
+ * fields and the two calls below walk it. Same idea as TLD_DEFINE_MAP in C++ and the
+ * comptime mapping in Zig, expressed the only way C allows: offsetof, a kind, a size.
+ *
+ *     typedef struct { uint8_t channel; double value; int valid; } reading;
+ *
+ *     static const qnnt_tld_field reading_fields[] = {
+ *         QNNT_TLD_FIELD(reading, channel, QNNT_TLD_F_U8),
+ *         QNNT_TLD_FIELD(reading, value,   QNNT_TLD_F_F64),
+ *         QNNT_TLD_FIELD(reading, valid,   QNNT_TLD_F_I32),
+ *     };
+ *     static const qnnt_tld_desc reading_desc = QNNT_TLD_DESC("reading", reading_fields, 1);
+ *
+ *     qnnt_tld_pack_struct(enc, &reading_desc, &value);
+ *     qnnt_tld_unpack_struct_bytes(bytes, len, &reading_desc, &out);
+ *
+ * The `named` flag on the descriptor picks the shape: 1 for an object keyed by field name
+ * (tolerant of fields being added or reordered), 0 for a positional array (smaller, and
+ * both ends must agree on the order).
+ *
+ * What C cannot express, and therefore is not supported: dynamically sized members. A
+ * string is a fixed char[N], packed to the first NUL and unpacked NUL-terminated and
+ * truncated to fit; a byte buffer is a fixed array plus a length member; an array is
+ * fixed-length. Anything genuinely dynamic belongs to the encoder and iterator API
+ * directly, which has no such limits.
+ *
+ * On unpack, a field whose key the frame does not carry is left untouched -- zero the
+ * struct first if that matters -- and a key matching no field is ignored, so a producer
+ * may add one without breaking consumers built earlier.
+ */
+
+typedef enum {
+    QNNT_TLD_F_BOOL   = 0,
+    QNNT_TLD_F_I8     = 1,
+    QNNT_TLD_F_I16    = 2,
+    QNNT_TLD_F_I32    = 3,
+    QNNT_TLD_F_I64    = 4,
+    QNNT_TLD_F_U8     = 5,
+    QNNT_TLD_F_U16    = 6,
+    QNNT_TLD_F_U32    = 7,
+    QNNT_TLD_F_U64    = 8,
+    QNNT_TLD_F_F32    = 9,
+    QNNT_TLD_F_F64    = 10,
+    /* char[size], NUL-terminated on both sides. */
+    QNNT_TLD_F_STRING = 11,
+    /* uint8_t[size] with a size_t length member named by length_offset. */
+    QNNT_TLD_F_BYTES  = 12,
+    /* A nested struct, described by the `nested` descriptor. */
+    QNNT_TLD_F_STRUCT = 13,
+    /* A fixed-length array; see element_kind, element_size and count. */
+    QNNT_TLD_F_ARRAY  = 14
+} qnnt_tld_field_kind;
+
+struct qnnt_tld_desc;
+
+typedef struct qnnt_tld_field {
+    const char *key;
+    size_t offset;
+    qnnt_tld_field_kind kind;
+    size_t size;          /* buffer length for STRING and BYTES */
+    size_t length_offset; /* BYTES: offset of the size_t holding the used length */
+    const struct qnnt_tld_desc *nested; /* STRUCT, and ARRAY of STRUCT */
+    qnnt_tld_field_kind element_kind;   /* ARRAY */
+    size_t element_size;                /* ARRAY */
+    size_t count;                       /* ARRAY */
+} qnnt_tld_field;
+
+typedef struct qnnt_tld_desc {
+    const char *name;
+    const qnnt_tld_field *fields;
+    size_t field_count;
+    int named; /* 1 = object keyed by name, 0 = positional array */
+} qnnt_tld_desc;
+
+/* A scalar member, keyed by its own name. */
+#define QNNT_TLD_FIELD(Type, member, field_kind)                                          \
+    { .key = #member, .offset = offsetof(Type, member), .kind = (field_kind),              \
+      .size = sizeof(((Type *)0)->member) }
+
+/* The same, with an explicit wire key -- the counterpart of TLD_NVP in C++. */
+#define QNNT_TLD_FIELD_AS(Type, member, field_kind, wire_key)                             \
+    { .key = (wire_key), .offset = offsetof(Type, member), .kind = (field_kind),           \
+      .size = sizeof(((Type *)0)->member) }
+
+/* A fixed char[N] string. */
+#define QNNT_TLD_FIELD_STRING(Type, member)                                               \
+    { .key = #member, .offset = offsetof(Type, member), .kind = QNNT_TLD_F_STRING,         \
+      .size = sizeof(((Type *)0)->member) }
+
+/* A fixed uint8_t[N] buffer plus the size_t member holding how much of it is used. */
+#define QNNT_TLD_FIELD_BYTES(Type, member, length_member)                                 \
+    { .key = #member, .offset = offsetof(Type, member), .kind = QNNT_TLD_F_BYTES,          \
+      .size = sizeof(((Type *)0)->member),                                                 \
+      .length_offset = offsetof(Type, length_member) }
+
+/* A nested struct. */
+#define QNNT_TLD_FIELD_STRUCT(Type, member, desc_ptr)                                     \
+    { .key = #member, .offset = offsetof(Type, member), .kind = QNNT_TLD_F_STRUCT,         \
+      .size = sizeof(((Type *)0)->member), .nested = (desc_ptr) }
+
+/* A fixed-length array of a scalar kind. */
+#define QNNT_TLD_FIELD_ARRAY(Type, member, elem_kind)                                     \
+    { .key = #member, .offset = offsetof(Type, member), .kind = QNNT_TLD_F_ARRAY,          \
+      .size = sizeof(((Type *)0)->member), .element_kind = (elem_kind),                    \
+      .element_size = sizeof(((Type *)0)->member[0]),                                      \
+      .count = sizeof(((Type *)0)->member) / sizeof(((Type *)0)->member[0]) }
+
+/* A fixed-length array of a nested struct. */
+#define QNNT_TLD_FIELD_ARRAY_STRUCT(Type, member, desc_ptr)                               \
+    { .key = #member, .offset = offsetof(Type, member), .kind = QNNT_TLD_F_ARRAY,          \
+      .size = sizeof(((Type *)0)->member), .element_kind = QNNT_TLD_F_STRUCT,               \
+      .nested = (desc_ptr),                                                                \
+      .element_size = sizeof(((Type *)0)->member[0]),                                      \
+      .count = sizeof(((Type *)0)->member) / sizeof(((Type *)0)->member[0]) }
+
+#define QNNT_TLD_DESC(desc_name, field_array, is_named)                                   \
+    { .name = (desc_name), .fields = (field_array),                                        \
+      .field_count = sizeof(field_array) / sizeof((field_array)[0]), .named = (is_named) }
+
+qnnt_tld_status qnnt_tld_pack_struct(qnnt_tld_encoder *enc,
+                                     const qnnt_tld_desc *desc,
+                                     const void *value);
+
+qnnt_tld_status qnnt_tld_unpack_struct(const qnnt_tld_frame *frame,
+                                       const qnnt_tld_desc *desc,
+                                       void *out);
+
+qnnt_tld_status qnnt_tld_unpack_struct_bytes(const uint8_t *bytes, size_t len,
+                                             const qnnt_tld_desc *desc,
+                                             void *out);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

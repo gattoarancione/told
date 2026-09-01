@@ -661,3 +661,251 @@ test "encoder byte counts match the spec's compactness claims" {
     try testing.expectEqual(@as(usize, 7), out.items.len);
     try testing.expectEqualSlices(u8, &.{ 0xB6, 0x91, 'a', 0x21, 0x91, 'b', 0x11 }, out.items);
 }
+
+// -- struct mapping ---------------------------------------------------------------------
+
+const Mode = enum { idle, running, faulted };
+
+const Reading = struct {
+    channel: u8,
+    value: f64,
+    valid: bool = true,
+};
+
+const Sample = struct {
+    id: u64,
+    name: []const u8,
+    mode: Mode,
+    readings: []const Reading,
+    raw: tld.Bytes,
+    note: ?[]const u8,
+    seq: [3]u16,
+};
+
+test "pack and unpack a nested struct" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const readings = [_]Reading{
+        .{ .channel = 1, .value = 3.5 },
+        .{ .channel = 2, .value = -0.25, .valid = false },
+    };
+
+    const sent: Sample = .{
+        .id = 99,
+        .name = "sensor-a",
+        .mode = .running,
+        .readings = &readings,
+        // Bytes on purpose: 0x00 and 0xFF would be a lie as text.
+        .raw = .{ .data = &[_]u8{ 0x00, 0xFF, 0x0A } },
+        .note = null,
+        .seq = .{ 7, 8, 9 },
+    };
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try tld.packTo(testing.allocator, &buf, sent);
+
+    const got = try tld.unpackFrom(Sample, buf.items, arena);
+
+    try testing.expectEqual(sent.id, got.id);
+    try testing.expectEqualStrings(sent.name, got.name);
+    try testing.expectEqual(Mode.running, got.mode);
+    try testing.expectEqual(@as(usize, 2), got.readings.len);
+    try testing.expectEqual(@as(u8, 1), got.readings[0].channel);
+    try testing.expectEqual(@as(f64, 3.5), got.readings[0].value);
+    try testing.expect(got.readings[0].valid);
+    try testing.expect(!got.readings[1].valid);
+    try testing.expectEqualSlices(u8, sent.raw.data, got.raw.data);
+    try testing.expect(got.note == null);
+    try testing.expectEqualSlices(u16, &sent.seq, &got.seq);
+}
+
+test "a byte slice packs as a string and Bytes as a buffer" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+
+    try tld.packTo(testing.allocator, &buf, @as([]const u8, "text"));
+    try testing.expectEqual(tld.Type.string, (try tld.decode(buf.items)).type);
+
+    try tld.packTo(testing.allocator, &buf, tld.Bytes{ .data = "text" });
+    try testing.expectEqual(tld.Type.buffer, (try tld.decode(buf.items)).type);
+}
+
+test "unpacking borrows from the frame when given no allocator" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+
+    const Named = struct { name: []const u8 };
+    try tld.packTo(testing.allocator, &buf, Named{ .name = "borrowed" });
+
+    const got = try tld.unpackFrom(Named, buf.items, null);
+    try testing.expectEqualStrings("borrowed", got.name);
+    // Not a copy: it points into the frame we just encoded.
+    const inside = @intFromPtr(got.name.ptr) >= @intFromPtr(buf.items.ptr) and
+        @intFromPtr(got.name.ptr) < @intFromPtr(buf.items.ptr) + buf.items.len;
+    try testing.expect(inside);
+}
+
+test "an unknown key is ignored and a missing field uses its default" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+
+    // What a newer producer sends: an extra field, and `valid` left out.
+    var e = tld.Encoder.init(testing.allocator, &buf);
+    const obj = e.beginObject();
+    try e.writeKey("channel");
+    try e.writeUint(4);
+    try e.writeKey("value");
+    try e.writeFloat64(1.5);
+    try e.writeKey("added_later");
+    try e.writeString("ignored");
+    try e.end(obj);
+
+    const got = try tld.unpackFrom(Reading, buf.items, null);
+    try testing.expectEqual(@as(u8, 4), got.channel);
+    try testing.expectEqual(@as(f64, 1.5), got.value);
+    try testing.expect(got.valid); // the struct's own default
+}
+
+test "a missing field with no default is an error, not a guess" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+
+    var e = tld.Encoder.init(testing.allocator, &buf);
+    const obj = e.beginObject();
+    try e.writeKey("channel");
+    try e.writeUint(4);
+    try e.end(obj); // `value` has no default
+
+    try testing.expectError(error.MissingField, tld.unpackFrom(Reading, buf.items, null));
+}
+
+test "an enum travels as an integer, and a name is still accepted" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+
+    // What pack writes: the integer, so C, C++ and Python can read it without a name table.
+    try tld.packTo(testing.allocator, &buf, Mode.faulted);
+    const as_int = try tld.decode(buf.items);
+    try testing.expectEqual(@as(i64, 2), try as_int.asInt());
+    try testing.expectEqual(Mode.faulted, try tld.unpackFrom(Mode, buf.items, null));
+
+    // And what it tolerates: a name, for frames written by hand or by an older build.
+    var e = tld.Encoder.init(testing.allocator, &buf);
+    buf.clearRetainingCapacity();
+    try e.writeString("running");
+    try testing.expectEqual(Mode.running, try tld.unpackFrom(Mode, buf.items, null));
+
+    // A value outside the enum is refused rather than cast into it.
+    buf.clearRetainingCapacity();
+    var e2 = tld.Encoder.init(testing.allocator, &buf);
+    try e2.writeInt(99);
+    try testing.expectError(error.UnknownTag, tld.unpackFrom(Mode, buf.items, null));
+}
+
+test "tuples map to arrays and tagged unions to a single-key object" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+
+    const Triple = struct { u8, []const u8, bool };
+    try tld.packTo(testing.allocator, &buf, Triple{ 5, "mid", true });
+    try testing.expectEqual(tld.Type.array, (try tld.decode(buf.items)).type);
+    const triple = try tld.unpackFrom(Triple, buf.items, arena);
+    try testing.expectEqual(@as(u8, 5), triple[0]);
+    try testing.expectEqualStrings("mid", triple[1]);
+    try testing.expect(triple[2]);
+
+    const Command = union(enum) { stop: void, set_speed: u32, label: []const u8 };
+    try tld.packTo(testing.allocator, &buf, Command{ .set_speed = 1200 });
+    const cmd = try tld.unpackFrom(Command, buf.items, arena);
+    try testing.expectEqual(@as(u32, 1200), cmd.set_speed);
+}
+
+test "out of range and type mismatch are reported, not truncated" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+
+    try tld.packTo(testing.allocator, &buf, @as(u32, 70000));
+    try testing.expectError(error.OutOfRange, tld.unpackFrom(u8, buf.items, null));
+
+    try tld.packTo(testing.allocator, &buf, @as([]const u8, "not a number"));
+    try testing.expectError(error.TypeMismatch, tld.unpackFrom(u32, buf.items, null));
+}
+
+
+// -- cross-language golden frame --------------------------------------------------------
+//
+// The bytes below were produced by packing the struct in `InteropSample` and verified, at
+// the time of writing, to be byte-for-byte what the C++ (TLD_DEFINE_MAP) and Python
+// (dataclass) mappings produce for the same values, and to be readable by all three.
+//
+// It is here so that a change to any mapping which alters the wire format fails a test
+// rather than quietly breaking a peer written in another language. If this test fails
+// after a deliberate format change, regenerate it -- but check the other two languages
+// still agree first, because that is the property being pinned.
+const golden_frame = @embedFile("testdata/interop.tld");
+
+const InteropMode = enum(i32) { idle = 0, running = 1, faulted = 2 };
+const InteropReading = struct { channel: u8, value: f64, valid: bool = true };
+const InteropPoint = struct { x: f64, y: f64 };
+
+const InteropSample = struct {
+    id: u64,
+    name: []const u8,
+    mode: InteropMode,
+    readings: []const InteropReading,
+    raw: tld.Bytes,
+    note: ?[]const u8,
+    origin: InteropPoint,
+};
+
+fn interopCanonical() InteropSample {
+    return .{
+        .id = 99,
+        .name = "sensor-a",
+        .mode = .faulted,
+        .readings = &[_]InteropReading{
+            .{ .channel = 1, .value = 3.5, .valid = true },
+            .{ .channel = 2, .value = -0.25, .valid = false },
+        },
+        .raw = .{ .data = &[_]u8{ 0x00, 0xFF, 0x0A } },
+        .note = null,
+        .origin = .{ .x = 1.5, .y = -2.5 },
+    };
+}
+
+test "the golden cross-language frame still decodes" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    const got = try tld.unpackFrom(InteropSample, golden_frame, arena_state.allocator());
+    const want = interopCanonical();
+
+    try testing.expectEqual(want.id, got.id);
+    try testing.expectEqualStrings(want.name, got.name);
+    try testing.expectEqual(want.mode, got.mode);
+    try testing.expectEqual(want.readings.len, got.readings.len);
+    for (want.readings, got.readings) |a, b| {
+        try testing.expectEqual(a.channel, b.channel);
+        try testing.expectEqual(a.value, b.value);
+        try testing.expectEqual(a.valid, b.valid);
+    }
+    try testing.expectEqualSlices(u8, want.raw.data, got.raw.data);
+    try testing.expect(got.note == null);
+    try testing.expectEqual(want.origin.x, got.origin.x);
+    try testing.expectEqual(want.origin.y, got.origin.y);
+}
+
+test "and packing still produces exactly those bytes" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+
+    try tld.packTo(testing.allocator, &buf, interopCanonical());
+    try testing.expectEqualSlices(u8, golden_frame, buf.items);
+}

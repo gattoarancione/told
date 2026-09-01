@@ -133,6 +133,90 @@ with qnnt.Node(registry_port=DEMO_PORT, queue_capacity=8192) as node:
           f"{(len(text)+len(frames))/max(polls,1):.0f} messages per poll")
 
 
+# ---------------------------------------------------------------- struct mapping
+#
+# The counterpart of the TLD_DEFINE_MAP macros in C++ and of tld.pack/unpack in Zig. The
+# golden frame at the end is the one that matters: it was produced by the Zig mapping, and
+# this side has to both read it and reproduce it exactly, or a Python producer and a Zig
+# consumer have quietly diverged.
+
+from dataclasses import dataclass
+from enum import IntEnum
+from typing import Optional
+
+
+class Mode(IntEnum):
+    idle = 0
+    running = 1
+    faulted = 2
+
+
+@dataclass
+class Reading:
+    channel: int
+    value: float
+    valid: bool = True
+
+
+@dataclass
+class Point:
+    x: float
+    y: float
+
+
+@dataclass
+class Sample:
+    id: int
+    name: str
+    mode: Mode
+    readings: list[Reading]
+    raw: bytes
+    note: Optional[str]
+    origin: Point
+
+
+CANONICAL = Sample(99, 'sensor-a', Mode.faulted,
+                   [Reading(1, 3.5, True), Reading(2, -0.25, False)],
+                   bytes([0x00, 0xFF, 0x0A]), None, Point(1.5, -2.5))
+
+packed = tld.pack(CANONICAL)
+check('a dataclass round trips', tld.unpack(Sample, packed) == CANONICAL,
+      f"{len(packed)} bytes")
+
+# A field the frame omits falls back to the dataclass default; an unknown key is ignored.
+lenient = tld.dumps({'channel': 4, 'value': 1.5, 'added_later': 'ignored'})
+check('unknown keys ignored, defaults applied',
+      tld.unpack(Reading, lenient) == Reading(4, 1.5, True))
+
+try:
+    tld.unpack(Reading, tld.dumps({'channel': 4}))
+    check('a missing field without a default is refused', False)
+except tld.TldError as err:
+    # str(err), not err.args[1]: Error collapses status, message and context into one
+    # message, so args has a single element.
+    check('a missing field without a default is refused', True, str(err))
+
+# Enums travel as their value, and a name is accepted too, as in Zig.
+check('enum by value and by name',
+      tld.unpack(Mode, tld.dumps(2)) is Mode.faulted
+      and tld.unpack(Mode, tld.dumps('running')) is Mode.running)
+
+golden_path = Path(__file__).resolve().parent.parent / 'lib' / 'testdata' / 'interop.tld'
+if golden_path.exists():
+    golden = golden_path.read_bytes()
+    check('the golden frame from Zig decodes here',
+          tld.unpack(Sample, golden) == CANONICAL)
+    check('and Python re-encodes it byte for byte', packed == golden,
+          f"{len(packed)} vs {len(golden)} bytes")
+else:
+    # Absent when this demo runs from an installed wheel, which carries the package and the
+    # shared library but not the repository's test data. Not a failure: the golden frame is
+    # a source-tree check, and the build runs this same script both ways.
+    print('  skip  golden frame check (no source tree here)')
+
+print()
+
+
 try:
     with qnnt.Node(registry_port=DEMO_PORT) as first, qnnt.Node(registry_port=DEMO_PORT) as second:
         check('a second Node is refused', False)

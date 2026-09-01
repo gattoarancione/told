@@ -725,3 +725,291 @@ pub fn stringify(frame: Frame, allocator: Allocator, out: *std.ArrayList(u8), ma
 test {
     _ = @import("./tld.test.zig");
 }
+
+// ---------------------------------------------------------------- struct mapping
+//
+// Packing a Zig value straight to TLD and back, the way msgpack's pack/unpack work on a
+// C++ object. Zig needs no macros and no descriptor tables for this: @typeInfo gives the
+// field names and types at compile time, so `pack` and `unpack` below are ordinary
+// recursive functions over the type rather than over a schema someone has to maintain.
+//
+// The mapping:
+//
+//   bool                      -> bool
+//   unsigned int              -> tinyuint / int8..int64, smallest that fits
+//   signed int                -> int8..int64
+//   f32 / f64                 -> float32 / float64
+//   enum                      -> its integer value (a name is also accepted on unpack)
+//   optional                  -> null, or the child
+//   []const u8                -> string (use `Bytes` to force a binary buffer)
+//   Bytes                     -> buffer
+//   slice / array of T        -> array of T
+//   tuple                     -> array, positionally
+//   struct                    -> object, field names as keys
+//   tagged union              -> object with one key, the active tag
+//
+// Unpacking is deliberately lenient in one direction and strict in the other: unknown keys
+// in the frame are ignored, so a producer may add fields without breaking older consumers,
+// while a field missing from the frame is an error unless the struct gives it a default.
+
+/// Wrap a byte slice to pack it as a TLD buffer rather than a string. `[]const u8` alone
+/// is ambiguous -- text far more often than not -- so this is how binary says so.
+pub const Bytes = struct {
+    data: []const u8,
+};
+
+pub const PackError = Encoder.WriteError;
+
+pub const UnpackError = Error || Allocator.Error || error{
+    /// The frame's type cannot become the requested Zig type.
+    TypeMismatch,
+    /// A struct field with no default was absent from the object.
+    MissingField,
+    /// A fixed-size array was given a different number of elements.
+    WrongArrayLength,
+    /// An enum or union tag in the frame names nothing in the Zig type.
+    UnknownTag,
+    /// The value does not fit the target integer type.
+    OutOfRange,
+};
+
+/// Encode `value` -- any Zig value the mapping above covers -- into `e`.
+pub fn pack(e: *Encoder, value: anytype) PackError!void {
+    const T = @TypeOf(value);
+
+    if (T == Bytes) return e.writeBuffer(value.data);
+
+    switch (@typeInfo(T)) {
+        .bool => return e.writeBool(value),
+        // A non-negative value takes the unsigned encoding whatever the Zig type's
+        // signedness: TINYUINT holds 0..15 in one byte where INT8 needs two, and asInt
+        // reads an unsigned frame back without complaint. It also makes the bytes match
+        // what the C++ and Python sides emit for the same struct.
+        .int => |info| {
+            if (info.signedness == .unsigned) return e.writeUint(@intCast(value));
+            return if (value >= 0) e.writeUint(@intCast(value)) else e.writeInt(@intCast(value));
+        },
+        .comptime_int => return e.writeInt(value),
+        .float => |info| return switch (info.bits) {
+            32 => e.writeFloat32(value),
+            else => e.writeFloat64(@floatCast(value)),
+        },
+        .comptime_float => return e.writeFloat64(value),
+        // The integer, not the tag name. C++ cannot turn a name back into an enumerator
+        // without reflection it does not have, and this format has to be readable from
+        // C, C++ and Python as well as Zig. Unpacking still accepts a name, so frames
+        // written by hand or by an older build stay readable.
+        .@"enum" => {
+            const raw = @intFromEnum(value);
+            return if (raw >= 0) e.writeUint(@intCast(raw)) else e.writeInt(@intCast(raw));
+        },
+        .optional => return if (value) |v| pack(e, v) else e.writeNull(),
+        .null => return e.writeNull(),
+
+        .pointer => |ptr| switch (ptr.size) {
+            .one => return pack(e, value.*),
+            .slice => {
+                if (ptr.child == u8) return e.writeString(value);
+                const mark = e.beginArray();
+                for (value) |item| try pack(e, item);
+                return e.end(mark);
+            },
+            else => @compileError("tld.pack: cannot pack " ++ @typeName(T)),
+        },
+
+        .array => |arr| {
+            if (arr.child == u8) return e.writeString(&value);
+            const mark = e.beginArray();
+            for (value) |item| try pack(e, item);
+            return e.end(mark);
+        },
+
+        .@"struct" => |st| {
+            // A tuple is positional by nature, so it becomes an array; a named struct
+            // carries its field names into the object.
+            if (st.is_tuple) {
+                const mark = e.beginArray();
+                inline for (st.fields) |f| try pack(e, @field(value, f.name));
+                return e.end(mark);
+            }
+            const mark = e.beginObject();
+            inline for (st.fields) |f| {
+                try e.writeKey(f.name);
+                try pack(e, @field(value, f.name));
+            }
+            return e.end(mark);
+        },
+
+        .@"union" => |un| {
+            if (un.tag_type == null) @compileError("tld.pack: untagged union " ++ @typeName(T));
+            const mark = e.beginObject();
+            switch (value) {
+                inline else => |payload, tag| {
+                    try e.writeKey(@tagName(tag));
+                    try pack(e, payload);
+                },
+            }
+            return e.end(mark);
+        },
+
+        .void => return e.writeNull(),
+
+        else => @compileError("tld.pack: unsupported type " ++ @typeName(T)),
+    }
+}
+
+/// Decode `frame` into a `T`.
+///
+/// `allocator` decides who owns the strings and slices in the result. Pass one and they are
+/// copied out, so the result outlives the frame; pass null and they point into the frame's
+/// own bytes, which is free but only valid while those bytes are.
+///
+/// There is no matching `free`: use an arena and drop it whole. Reference counting the
+/// interior of a decoded struct is not a thing this wants to own.
+pub fn unpack(comptime T: type, frame: Frame, allocator: ?Allocator) UnpackError!T {
+    if (T == Bytes) return .{ .data = try dupeMaybe(try frame.asBytes(), allocator) };
+
+    switch (@typeInfo(T)) {
+        .bool => return frame.asBool() catch error.TypeMismatch,
+        .int => |info| {
+            if (info.signedness == .unsigned) {
+                const v = frame.asUint() catch return error.TypeMismatch;
+                return std.math.cast(T, v) orelse error.OutOfRange;
+            }
+            const v = frame.asInt() catch return error.TypeMismatch;
+            return std.math.cast(T, v) orelse error.OutOfRange;
+        },
+        .float => {
+            const v = frame.asFloat() catch return error.TypeMismatch;
+            return @floatCast(v);
+        },
+        .@"enum" => {
+            // Integers are what `pack` writes; a name is accepted too, so a frame from a
+            // language that spells enums out, or from a human, still decodes.
+            if (frame.asString()) |name| {
+                return std.meta.stringToEnum(T, name) orelse error.UnknownTag;
+            } else |_| {}
+            const v = frame.asInt() catch return error.TypeMismatch;
+            // Checked rather than @enumFromInt'd: a value outside the enum would otherwise
+            // become an invalid tag that misbehaves far from here.
+            inline for (@typeInfo(T).@"enum".fields) |f| {
+                if (v == f.value) return @field(T, f.name);
+            }
+            return error.UnknownTag;
+        },
+        .optional => |opt| {
+            if (frame.isNull()) return null;
+            return try unpack(opt.child, frame, allocator);
+        },
+
+        .pointer => |ptr| switch (ptr.size) {
+            .slice => {
+                if (ptr.child == u8) return try dupeMaybe(try frame.asBytes(), allocator);
+
+                // A slice of anything else needs storage for the elements, so unlike a
+                // byte slice this cannot borrow from the frame.
+                const alloc = allocator orelse return error.OutOfMemory;
+                var list: std.ArrayList(ptr.child) = .empty;
+                errdefer list.deinit(alloc);
+                var it = frame.arrayIterator() catch return error.TypeMismatch;
+                while (try it.next()) |item| {
+                    try list.append(alloc, try unpack(ptr.child, item, allocator));
+                }
+                return try list.toOwnedSlice(alloc);
+            },
+            else => @compileError("tld.unpack: cannot unpack into " ++ @typeName(T)),
+        },
+
+        .array => |arr| {
+            var out: T = undefined;
+            if (arr.child == u8) {
+                const bytes = try frame.asBytes();
+                if (bytes.len != arr.len) return error.WrongArrayLength;
+                @memcpy(&out, bytes);
+                return out;
+            }
+            var it = frame.arrayIterator() catch return error.TypeMismatch;
+            var i: usize = 0;
+            while (try it.next()) |item| : (i += 1) {
+                if (i >= arr.len) return error.WrongArrayLength;
+                out[i] = try unpack(arr.child, item, allocator);
+            }
+            if (i != arr.len) return error.WrongArrayLength;
+            return out;
+        },
+
+        .@"struct" => |st| {
+            var out: T = undefined;
+
+            if (st.is_tuple) {
+                var it = frame.arrayIterator() catch return error.TypeMismatch;
+                inline for (st.fields) |f| {
+                    const item = (try it.next()) orelse return error.WrongArrayLength;
+                    @field(out, f.name) = try unpack(f.type, item, allocator);
+                }
+                return out;
+            }
+
+            // Track which fields the frame supplied, so a missing one can fall back to its
+            // default and a missing one without a default can be named as an error.
+            var seen = [_]bool{false} ** st.fields.len;
+
+            var it = frame.objectIterator() catch return error.TypeMismatch;
+            while (try it.next()) |pair| {
+                inline for (st.fields, 0..) |f, idx| {
+                    if (std.mem.eql(u8, pair.key, f.name)) {
+                        @field(out, f.name) = try unpack(f.type, pair.value, allocator);
+                        seen[idx] = true;
+                    }
+                }
+                // Keys matching no field are ignored on purpose: it lets a producer add a
+                // field without every consumer having to be rebuilt first.
+            }
+
+            inline for (st.fields, 0..) |f, idx| {
+                if (!seen[idx]) {
+                    const default = f.defaultValue() orelse return error.MissingField;
+                    @field(out, f.name) = default;
+                }
+            }
+            return out;
+        },
+
+        .@"union" => |un| {
+            const Tag = un.tag_type orelse
+                @compileError("tld.unpack: untagged union " ++ @typeName(T));
+
+            var it = frame.objectIterator() catch return error.TypeMismatch;
+            const pair = (try it.next()) orelse return error.TypeMismatch;
+            const tag = std.meta.stringToEnum(Tag, pair.key) orelse return error.UnknownTag;
+
+            switch (tag) {
+                inline else => |t| {
+                    const Payload = @FieldType(T, @tagName(t));
+                    return @unionInit(T, @tagName(t), try unpack(Payload, pair.value, allocator));
+                },
+            }
+        },
+
+        .void => return {},
+
+        else => @compileError("tld.unpack: unsupported type " ++ @typeName(T)),
+    }
+}
+
+fn dupeMaybe(bytes: []const u8, allocator: ?Allocator) Allocator.Error![]const u8 {
+    return if (allocator) |a| try a.dupe(u8, bytes) else bytes;
+}
+
+/// Pack `value` into `out`, which is cleared first. The convenience form of `pack` for
+/// callers that just want the bytes.
+pub fn packTo(allocator: Allocator, out: *std.ArrayList(u8), value: anytype) PackError!void {
+    out.clearRetainingCapacity();
+    var e = Encoder.init(allocator, out);
+    try pack(&e, value);
+}
+
+/// Decode the frame at the start of `bytes` into a `T`.
+pub fn unpackFrom(comptime T: type, bytes: []const u8, allocator: ?Allocator) UnpackError!T {
+    return unpack(T, try decode(bytes), allocator);
+}

@@ -20,6 +20,10 @@ node while decoding, which is fine for message-sized data and would not be for m
 from __future__ import annotations
 
 import ctypes as C
+import dataclasses as _dataclasses
+import enum as _enum
+import types as _types
+import typing as _typing
 from typing import Any
 
 from . import _lib
@@ -111,6 +115,19 @@ class Encoder:
         elif isinstance(value, (bytes, bytearray, memoryview)):
             raw = bytes(value)
             _check(lib.qnnt_tld_write_buffer(handle, raw, len(raw)), "write bytes")
+        # Enums as their value, which is what the Zig and C++ sides write, so a frame
+        # crosses languages without a shared name table.
+        elif isinstance(value, _enum.Enum):
+            self.write(value.value)
+        # A dataclass becomes an object keyed by field name. Checked before list/dict so a
+        # dataclass that happens to subclass one is still treated as a record.
+        elif _dataclasses.is_dataclass(value) and not isinstance(value, type):
+            mark = C.c_size_t()
+            _check(lib.qnnt_tld_begin_object(handle, C.byref(mark)), "begin object")
+            for field in _dataclasses.fields(value):
+                self.write(field.name)
+                self.write(getattr(value, field.name))
+            _check(lib.qnnt_tld_end_object(handle, mark), "end object")
         elif isinstance(value, (list, tuple)):
             mark = C.c_size_t()
             _check(lib.qnnt_tld_begin_array(handle, C.byref(mark)), "begin array")
@@ -220,3 +237,116 @@ def frame_size(data: bytes) -> int | None:
 def validate(data: bytes, max_depth: int = 32) -> None:
     """Check a whole frame, nested contents included. Raises on anything malformed."""
     _check(_lib_ref().qnnt_tld_validate(data, len(data), max_depth), "validate")
+
+
+# ---------------------------------------------------------------- struct mapping
+#
+# pack/unpack for dataclasses, the counterpart of MSGPACK_DEFINE_MAP in C++ and of
+# tld.pack/tld.unpack in Zig. Python needs no macros: a dataclass already carries its field
+# names and type hints, so `unpack` can rebuild one from a frame without being told the
+# shape twice.
+#
+#     @dataclass
+#     class Reading:
+#         channel: int
+#         value: float
+#         valid: bool = True
+#
+#     data = qnnt.tld.pack(Reading(1, 3.5))
+#     back = qnnt.tld.unpack(Reading, data)
+#
+# Mapping: dataclass -> object keyed by field name, Enum -> its value, bytes -> buffer,
+# str -> string, list/tuple -> array, dict -> object, Optional -> null or value. Unknown
+# keys in the frame are ignored, and a field the frame omits falls back to the dataclass
+# default; without a default it is an error.
+
+
+def pack(value: Any) -> bytes:
+    """Encode a value -- dataclass, Enum, or anything dumps() accepts -- as one frame."""
+    return dumps(value)
+
+
+def unpack(target: type, data: bytes) -> Any:
+    """Decode one frame and rebuild it as `target`, following that type's annotations."""
+    return _convert(loads(data), target)
+
+
+def _convert(value: Any, target: Any) -> Any:
+    """Turn a plain decoded value into `target`, recursing through type annotations."""
+    if target is Any or target is None:
+        return value
+
+    origin = _typing.get_origin(target)
+    args = _typing.get_args(target)
+
+    # Optional[T] and the wider X | None: None passes through, anything else takes the
+    # first branch that is not NoneType.
+    if origin is _typing.Union or isinstance(target, _types.UnionType):
+        if value is None:
+            return None
+        for arg in args:
+            if arg is not type(None):
+                return _convert(value, arg)
+        return None
+
+    if origin in (list, _typing.List):
+        item = args[0] if args else Any
+        return [_convert(v, item) for v in value]
+
+    if origin in (tuple, _typing.Tuple):
+        if len(args) == 2 and args[1] is Ellipsis:
+            return tuple(_convert(v, args[0]) for v in value)
+        if len(args) != len(value):
+            raise TldError(-1, "tuple length mismatch",
+                           f"expected {len(args)}, frame has {len(value)}")
+        return tuple(_convert(v, a) for v, a in zip(value, args))
+
+    if origin in (dict, _typing.Dict):
+        item = args[1] if len(args) == 2 else Any
+        return {k: _convert(v, item) for k, v in value.items()}
+
+    if isinstance(target, type):
+        if issubclass(target, _enum.Enum):
+            # The value is what pack writes; a name is accepted too, matching Zig.
+            if isinstance(value, str):
+                try:
+                    return target[value]
+                except KeyError:
+                    raise TldError(-1, "unknown enum name",
+                                   f"{value!r} is not a member of {target.__name__}") from None
+            return target(value)
+
+        if _dataclasses.is_dataclass(target):
+            if not isinstance(value, dict):
+                raise TldError(-1, "type mismatch",
+                               f"{target.__name__} needs an object, frame has "
+                               f"{type(value).__name__}")
+            hints = _typing.get_type_hints(target)
+            kwargs = {}
+            for field in _dataclasses.fields(target):
+                if field.name in value:
+                    kwargs[field.name] = _convert(value[field.name],
+                                                  hints.get(field.name, Any))
+                elif (field.default is _dataclasses.MISSING
+                      and field.default_factory is _dataclasses.MISSING):
+                    raise TldError(-1, "missing field",
+                                   f"{target.__name__}.{field.name} is absent from the "
+                                   "frame and has no default")
+                # Otherwise leave it out and let the dataclass apply its own default.
+            # Keys matching no field are ignored, so a producer may add one without
+            # every consumer being updated first.
+            return target(**kwargs)
+
+        if target is bytes and isinstance(value, (bytes, bytearray, memoryview)):
+            return bytes(value)
+        if target is str and isinstance(value, bytes):
+            return value.decode("utf-8")
+        if target is float and isinstance(value, int):
+            return float(value)
+        if target in (int, float, str, bool, bytes) and isinstance(value, target):
+            return value
+        if target in (int, float, str, bool, bytes):
+            raise TldError(-1, "type mismatch",
+                           f"expected {target.__name__}, frame has {type(value).__name__}")
+
+    return value

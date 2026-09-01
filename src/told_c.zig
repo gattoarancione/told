@@ -403,3 +403,307 @@ export fn qnnt_tld_status_name(status: Status) callconv(.c) [*:0]const u8 {
 export fn qnnt_tld_version() callconv(.c) [*:0]const u8 {
     return tld.version;
 }
+
+// ---------------------------------------------------------------- struct mapping
+//
+// C has neither templates nor reflection, so a struct describes itself once as a table of
+// fields and the generic pack/unpack below walk it. This is the same idea as the C++
+// TLD_DEFINE_MAP macros and the Zig comptime mapping, expressed the only way C allows:
+// offsetof, a kind tag, and a size.
+//
+// Deliberate limits, because C has no container to decode into:
+//
+//   * strings are fixed char[N] buffers, packed up to the first NUL and unpacked
+//     NUL-terminated and truncated to fit;
+//   * byte buffers are fixed arrays plus a length member;
+//   * arrays are fixed-length, of a scalar or of a nested struct;
+//   * anything dynamic stays manual -- use the encoder and iterator directly for that.
+//
+// A field whose key is absent from the frame is left as the caller had it, so zero the
+// struct first if that matters. Unknown keys in the frame are ignored, as everywhere else.
+
+const FieldKind = enum(c_int) {
+    boolean = 0,
+    i8 = 1,
+    i16 = 2,
+    i32 = 3,
+    i64 = 4,
+    u8 = 5,
+    u16 = 6,
+    u32 = 7,
+    u64 = 8,
+    f32 = 9,
+    f64 = 10,
+    /// char[size], NUL-terminated on both sides.
+    string = 11,
+    /// uint8_t[size] paired with a length member named by `length_offset`.
+    bytes = 12,
+    /// A nested struct described by `nested`.
+    nested = 13,
+    /// A fixed-length array of `count` elements, each `element_size` bytes and described
+    /// by `element_kind` (or `nested` when that is `.nested`).
+    array = 14,
+    _,
+};
+
+const FieldDesc = extern struct {
+    key: ?[*:0]const u8,
+    offset: usize,
+    kind: FieldKind,
+    /// Byte size of the member: the buffer length for `string`/`bytes`, otherwise unused.
+    size: usize = 0,
+    /// `bytes` only: offset of the size_t member holding the used length.
+    length_offset: usize = 0,
+    /// `nested`, and `array` of nested.
+    nested: ?*const StructDesc = null,
+    /// `array` only.
+    element_kind: FieldKind = .boolean,
+    element_size: usize = 0,
+    count: usize = 0,
+};
+
+const StructDesc = extern struct {
+    name: ?[*:0]const u8,
+    fields: ?[*]const FieldDesc,
+    field_count: usize,
+    /// 1 for an object keyed by field name, 0 for a positional array.
+    named: c_int,
+};
+
+// Spelled out rather than inferred: packStruct and packField call each other for nested
+// structs, and Zig cannot infer an error set through that cycle.
+const MapError = tld.Error || tld.Encoder.WriteError || error{
+    OutOfRange,
+    InvalidArgument,
+};
+
+fn fieldPtr(base: ?*anyopaque, offset: usize) [*]u8 {
+    const raw: [*]u8 = @ptrCast(base.?);
+    return raw + offset;
+}
+
+fn constFieldPtr(base: ?*const anyopaque, offset: usize) [*]const u8 {
+    const raw: [*]const u8 = @ptrCast(base.?);
+    return raw + offset;
+}
+
+fn readScalar(comptime T: type, ptr: [*]const u8) T {
+    var out: T = undefined;
+    @memcpy(std.mem.asBytes(&out), ptr[0..@sizeOf(T)]);
+    return out;
+}
+
+fn writeScalar(comptime T: type, ptr: [*]u8, value: T) void {
+    @memcpy(ptr[0..@sizeOf(T)], std.mem.asBytes(&value));
+}
+
+fn packScalar(enc: *tld.Encoder, kind: FieldKind, ptr: [*]const u8) MapError!void {
+    switch (kind) {
+        .boolean => try enc.writeBool(readScalar(bool, ptr)),
+        // Non-negative values take the unsigned encoding, matching the other languages so
+        // the same struct produces the same bytes everywhere.
+        .i8 => try packSigned(enc, readScalar(i8, ptr)),
+        .i16 => try packSigned(enc, readScalar(i16, ptr)),
+        .i32 => try packSigned(enc, readScalar(i32, ptr)),
+        .i64 => try packSigned(enc, readScalar(i64, ptr)),
+        .u8 => try enc.writeUint(readScalar(u8, ptr)),
+        .u16 => try enc.writeUint(readScalar(u16, ptr)),
+        .u32 => try enc.writeUint(readScalar(u32, ptr)),
+        .u64 => try enc.writeUint(readScalar(u64, ptr)),
+        .f32 => try enc.writeFloat32(readScalar(f32, ptr)),
+        .f64 => try enc.writeFloat64(readScalar(f64, ptr)),
+        else => return error.InvalidArgument,
+    }
+}
+
+fn packSigned(enc: *tld.Encoder, value: anytype) MapError!void {
+    if (value >= 0) return enc.writeUint(@intCast(value));
+    return enc.writeInt(@intCast(value));
+}
+
+fn unpackScalar(kind: FieldKind, frame: tld.Frame, ptr: [*]u8) MapError!void {
+    switch (kind) {
+        .boolean => writeScalar(bool, ptr, try frame.asBool()),
+        .i8 => writeScalar(i8, ptr, std.math.cast(i8, try frame.asInt()) orelse return error.OutOfRange),
+        .i16 => writeScalar(i16, ptr, std.math.cast(i16, try frame.asInt()) orelse return error.OutOfRange),
+        .i32 => writeScalar(i32, ptr, std.math.cast(i32, try frame.asInt()) orelse return error.OutOfRange),
+        .i64 => writeScalar(i64, ptr, try frame.asInt()),
+        .u8 => writeScalar(u8, ptr, std.math.cast(u8, try frame.asUint()) orelse return error.OutOfRange),
+        .u16 => writeScalar(u16, ptr, std.math.cast(u16, try frame.asUint()) orelse return error.OutOfRange),
+        .u32 => writeScalar(u32, ptr, std.math.cast(u32, try frame.asUint()) orelse return error.OutOfRange),
+        .u64 => writeScalar(u64, ptr, try frame.asUint()),
+        .f32 => writeScalar(f32, ptr, @floatCast(try frame.asFloat())),
+        .f64 => writeScalar(f64, ptr, try frame.asFloat()),
+        else => return error.InvalidArgument,
+    }
+}
+
+fn packField(enc: *tld.Encoder, field: *const FieldDesc, base: ?*const anyopaque) MapError!void {
+    const ptr = constFieldPtr(base, field.offset);
+
+    switch (field.kind) {
+        .string => {
+            const buf = ptr[0..field.size];
+            const end = std.mem.indexOfScalar(u8, buf, 0) orelse field.size;
+            try enc.writeString(buf[0..end]);
+        },
+        .bytes => {
+            const used = readScalar(usize, constFieldPtr(base, field.length_offset));
+            if (used > field.size) return error.InvalidArgument;
+            try enc.writeBuffer(ptr[0..used]);
+        },
+        .nested => {
+            const desc = field.nested orelse return error.InvalidArgument;
+            try packStruct(enc, desc, @ptrCast(ptr));
+        },
+        .array => {
+            const mark = enc.beginArray();
+            var i: usize = 0;
+            while (i < field.count) : (i += 1) {
+                const element = ptr + i * field.element_size;
+                if (field.element_kind == .nested) {
+                    const desc = field.nested orelse return error.InvalidArgument;
+                    try packStruct(enc, desc, @ptrCast(element));
+                } else {
+                    try packScalar(enc, field.element_kind, element);
+                }
+            }
+            try enc.end(mark);
+        },
+        else => try packScalar(enc, field.kind, ptr),
+    }
+}
+
+fn unpackField(field: *const FieldDesc, frame: tld.Frame, base: ?*anyopaque) MapError!void {
+    const ptr = fieldPtr(base, field.offset);
+
+    switch (field.kind) {
+        .string => {
+            const text = try frame.asBytes();
+            if (field.size == 0) return error.InvalidArgument;
+            // Truncated rather than refused, and always NUL-terminated: a fixed buffer
+            // cannot hold everything a producer might send, and a C caller will treat the
+            // result as a string whatever we return.
+            const copy = @min(text.len, field.size - 1);
+            @memcpy(ptr[0..copy], text[0..copy]);
+            ptr[copy] = 0;
+        },
+        .bytes => {
+            const raw = try frame.asBytes();
+            const copy = @min(raw.len, field.size);
+            @memcpy(ptr[0..copy], raw[0..copy]);
+            writeScalar(usize, fieldPtr(base, field.length_offset), copy);
+        },
+        .nested => {
+            const desc = field.nested orelse return error.InvalidArgument;
+            try unpackStruct(desc, frame, @ptrCast(ptr));
+        },
+        .array => {
+            var it = try frame.arrayIterator();
+            var i: usize = 0;
+            while (try it.next()) |item| : (i += 1) {
+                if (i >= field.count) break; // extra elements ignored, as extra keys are
+                const element = ptr + i * field.element_size;
+                if (field.element_kind == .nested) {
+                    const desc = field.nested orelse return error.InvalidArgument;
+                    try unpackStruct(desc, item, @ptrCast(element));
+                } else {
+                    try unpackScalar(field.element_kind, item, element);
+                }
+            }
+        },
+        else => try unpackScalar(field.kind, frame, ptr),
+    }
+}
+
+fn packStruct(enc: *tld.Encoder, desc: *const StructDesc, value: ?*const anyopaque) MapError!void {
+    const fields = desc.fields orelse return error.InvalidArgument;
+
+    if (desc.named != 0) {
+        const mark = enc.beginObject();
+        var i: usize = 0;
+        while (i < desc.field_count) : (i += 1) {
+            const field = &fields[i];
+            const key = field.key orelse return error.InvalidArgument;
+            try enc.writeKey(std.mem.span(key));
+            try packField(enc, field, value);
+        }
+        try enc.end(mark);
+        return;
+    }
+
+    const mark = enc.beginArray();
+    var i: usize = 0;
+    while (i < desc.field_count) : (i += 1) {
+        try packField(enc, &fields[i], value);
+    }
+    try enc.end(mark);
+}
+
+fn unpackStruct(desc: *const StructDesc, frame: tld.Frame, out: ?*anyopaque) MapError!void {
+    const fields = desc.fields orelse return error.InvalidArgument;
+
+    if (desc.named != 0) {
+        var it = try frame.objectIterator();
+        while (try it.next()) |pair| {
+            var i: usize = 0;
+            while (i < desc.field_count) : (i += 1) {
+                const field = &fields[i];
+                const key = field.key orelse continue;
+                if (std.mem.eql(u8, pair.key, std.mem.span(key))) {
+                    try unpackField(field, pair.value, out);
+                    break;
+                }
+            }
+        }
+        return;
+    }
+
+    var it = try frame.arrayIterator();
+    var i: usize = 0;
+    while (try it.next()) |item| : (i += 1) {
+        if (i >= desc.field_count) break;
+        try unpackField(&fields[i], item, out);
+    }
+}
+
+/// Append `value`, described by `desc`, to the encoder.
+export fn qnnt_tld_pack_struct(
+    handle: ?*Encoder,
+    desc: ?*const StructDesc,
+    value: ?*const anyopaque,
+) callconv(.c) Status {
+    var enc = writer(handle) orelse return .invalid_argument;
+    const d = desc orelse return .invalid_argument;
+    if (value == null) return .invalid_argument;
+    packStruct(&enc, d, value) catch |err| return statusFor(err);
+    return .ok;
+}
+
+/// Fill `out`, described by `desc`, from a decoded frame.
+export fn qnnt_tld_unpack_struct(
+    frame: ?*const Frame,
+    desc: ?*const StructDesc,
+    out: ?*anyopaque,
+) callconv(.c) Status {
+    const f = frame orelse return .invalid_argument;
+    const d = desc orelse return .invalid_argument;
+    if (out == null) return .invalid_argument;
+    unpackStruct(d, fromCFrame(f), out) catch |err| return statusFor(err);
+    return .ok;
+}
+
+/// Decode `bytes` and fill `out` in one call, for the common case.
+export fn qnnt_tld_unpack_struct_bytes(
+    bytes: ?[*]const u8,
+    len: usize,
+    desc: ?*const StructDesc,
+    out: ?*anyopaque,
+) callconv(.c) Status {
+    const raw = bytes orelse return .invalid_argument;
+    const d = desc orelse return .invalid_argument;
+    if (out == null) return .invalid_argument;
+    const decoded = tld.decode(raw[0..len]) catch |err| return statusFor(err);
+    unpackStruct(d, decoded, out) catch |err| return statusFor(err);
+    return .ok;
+}

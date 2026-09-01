@@ -21,13 +21,20 @@
 
 #include "qnnt_tld.h"
 
+#include <array>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <ostream>
+#include <tuple>
+#include <type_traits>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace qnnt::tld {
 
@@ -388,7 +395,531 @@ private:
     qnnt_tld_encoder* handle_;
 };
 
+// ---------------------------------------------------------------- struct mapping
+//
+// Packing a C++ object straight to TLD and back, the way MSGPACK_DEFINE does for msgpack.
+// C++ has no reflection to lean on, so a class lists its own members once:
+//
+//     struct Reading {
+//         std::uint8_t channel;
+//         double value;
+//         bool valid;
+//         QNNT_TLD_DEFINE_MAP(channel, value, valid)   // object, names as keys
+//     };
+//
+//     struct Point {
+//         double x, y;
+//         QNNT_TLD_DEFINE(x, y)                        // array, positional and compact
+//     };
+//
+// then packs and unpacks with no further ceremony:
+//
+//     std::vector<std::uint8_t> bytes = qnnt::tld::pack(reading);
+//     auto back = qnnt::tld::unpack<Reading>(bytes);
+//
+// _MAP costs the key bytes and tolerates fields being added or reordered; _DEFINE is
+// smaller and positional, so both ends must agree on the order. Same choice, and the same
+// trade, as msgpack's two macros.
+//
+// Built-in support covers bool, every integer and floating type, enums (as their
+// underlying integer, which is what the Zig and Python sides emit too), std::string and
+// std::string_view, std::vector<std::uint8_t> as a binary buffer, std::vector<T> and
+// std::array<T,N> as arrays, std::optional<T> as null-or-value, std::map and
+// std::unordered_map keyed by string as objects, and any type carrying either macro.
+//
+// Unknown keys in a frame are ignored, so a producer may add a field without breaking
+// consumers built earlier. A key the frame does not carry leaves that member as the
+// constructor left it.
+
+namespace detail {
+
+/// Resolves TLD_BASE to a reference of the right constness, so the same macro text works
+/// in both the const and non-const tldFields() overloads -- packing needs const, unpacking
+/// needs mutable, and a plain static_cast could only satisfy one of them.
+template <class Base, class Derived>
+constexpr Base& tldBase(Derived& d) {
+    return static_cast<Base&>(d);
+}
+template <class Base, class Derived>
+constexpr const Base& tldBase(const Derived& d) {
+    return static_cast<const Base&>(d);
+}
+
+} // namespace detail
+
+/// Include a base class's members, as MSGPACK_BASE does. In the _MAP form the key is the
+/// base's name; in the array form it is one nested element.
+///
+///     struct Derived : Base {
+///         int extra;
+///         TLD_DEFINE_MAP(TLD_BASE(Base), extra)
+///     };
+#define TLD_BASE(Base) ::qnnt::tld::detail::tldBase<Base>(*this)
+
+/// Give a member a wire key different from its C++ name, as MSGPACK_NVP does. Useful for
+/// keeping keys short on a slow link without renaming the member.
+///
+///     TLD_DEFINE_MAP(TLD_NVP("ch", channel), TLD_NVP("v", value))
+#define TLD_NVP(key, member) member
+
+// Enums need no declaration here: any enum, scoped or plain, packs as its underlying
+// integer already, chosen by that type's signedness. This macro exists so code being
+// ported from msgpack -- where MSGPACK_ADD_ENUM is mandatory, because msgpack refuses an
+// undeclared enum -- keeps compiling with the line left in place. It checks that its
+// argument really is an enum and does nothing else.
+//
+// Use it at namespace scope, as MSGPACK_ADD_ENUM is used:
+//
+//     enum class Mode : int { idle, running };
+//     QNNT_TLD_ADD_ENUM(Mode)
+//
+// The representation is the integer in every language here, so a frame written by C++ is
+// read by Zig and Python without a shared name table. Zig additionally accepts a string,
+// for frames written by hand.
+#define QNNT_TLD_ADD_ENUM(EnumType)                                                       \
+    static_assert(::std::is_enum_v<EnumType>,                                             \
+                  "TLD_ADD_ENUM: " #EnumType " is not an enum");
+
+// The stringised member list is taken as a parameter rather than produced inside a shared
+// body, because # only refuses to expand its operand in the macro that the user actually
+// invoked. Forwarding __VA_ARGS__ through an alias and stringising it there captures the
+// *expanded* text instead -- which loses TLD_NVP's explicit key and turns TLD_BASE into
+// its own implementation detail. Both spellings below therefore stringise for themselves
+// and hand the text down.
+#define QNNT_TLD_FIELDS_IMPL(named, names_text, ...)                                      \
+    auto tldFields() { return ::std::forward_as_tuple(__VA_ARGS__); }                     \
+    auto tldFields() const { return ::std::forward_as_tuple(__VA_ARGS__); }               \
+    static constexpr bool tld_named_fields = (named);                                     \
+    static constexpr ::std::string_view tldFieldNames() { return names_text; }
+
+#define QNNT_TLD_DEFINE(...) QNNT_TLD_FIELDS_IMPL(false, #__VA_ARGS__, __VA_ARGS__)
+#define QNNT_TLD_DEFINE_MAP(...) QNNT_TLD_FIELDS_IMPL(true, #__VA_ARGS__, __VA_ARGS__)
+
+namespace detail {
+
+/// The i-th name out of a stringised macro argument list ("a, b, c"), trimmed.
+///
+/// This is why the macros stringise their arguments: it is the only way to recover member
+/// names in C++ without a reflection proposal that is not here yet. Evaluated at compile
+/// time, so no parsing happens at run time.
+constexpr std::string_view unwrapFieldName(std::string_view piece) {
+    // TLD_NVP("key", member) -> key. The explicit key wins over the member's own name.
+    if (piece.starts_with("TLD_NVP(")) {
+        const std::size_t open = piece.find('"');
+        if (open != std::string_view::npos) {
+            const std::size_t close = piece.find('"', open + 1);
+            if (close != std::string_view::npos) {
+                return piece.substr(open + 1, close - open - 1);
+            }
+        }
+        return piece;
+    }
+    // TLD_BASE(Base) -> Base, so a base class does not land under a key spelling out the
+    // macro call.
+    if (piece.starts_with("TLD_BASE(")) {
+        const std::size_t open = piece.find('(');
+        const std::size_t close = piece.rfind(')');
+        if (open != std::string_view::npos && close != std::string_view::npos && close > open) {
+            std::string_view inner = piece.substr(open + 1, close - open - 1);
+            // Drop any qualification: ns::Base is keyed as Base.
+            const std::size_t scope = inner.rfind(':');
+            if (scope != std::string_view::npos) inner = inner.substr(scope + 1);
+            return inner;
+        }
+    }
+    return piece;
+}
+
+constexpr std::string_view nthFieldName(std::string_view all, std::size_t index) {
+    std::size_t start = 0;
+    for (std::size_t i = 0;; ++i) {
+        // Split on the first comma at depth zero: TLD_NVP("k", m) contains one of its own.
+        std::size_t comma = std::string_view::npos;
+        int depth = 0;
+        for (std::size_t j = start; j < all.size(); ++j) {
+            const char c = all[j];
+            if (c == '(') ++depth;
+            else if (c == ')') --depth;
+            else if (c == ',' && depth == 0) { comma = j; break; }
+        }
+        std::string_view piece = comma == std::string_view::npos
+                                     ? all.substr(start)
+                                     : all.substr(start, comma - start);
+        while (!piece.empty() && (piece.front() == ' ' || piece.front() == '\t')) {
+            piece.remove_prefix(1);
+        }
+        while (!piece.empty() && (piece.back() == ' ' || piece.back() == '\t')) {
+            piece.remove_suffix(1);
+        }
+        if (i == index) return unwrapFieldName(piece);
+        if (comma == std::string_view::npos) return {};
+        start = comma + 1;
+    }
+}
+
+template <class T>
+concept HasTldFields = requires(const T& value) { value.tldFields(); };
+
+template <class T>
+struct IsByteVector : std::false_type {};
+template <class A>
+struct IsByteVector<std::vector<std::uint8_t, A>> : std::true_type {};
+
+template <class T>
+struct IsVector : std::false_type {};
+template <class E, class A>
+struct IsVector<std::vector<E, A>> : std::true_type {};
+
+template <class T>
+struct IsStdArray : std::false_type {};
+template <class E, std::size_t N>
+struct IsStdArray<std::array<E, N>> : std::true_type {};
+
+template <class T>
+struct IsOptional : std::false_type {};
+template <class E>
+struct IsOptional<std::optional<E>> : std::true_type {};
+
+template <class T>
+struct IsStringMap : std::false_type {};
+template <class V, class C, class A>
+struct IsStringMap<std::map<std::string, V, C, A>> : std::true_type {};
+template <class V, class H, class E, class A>
+struct IsStringMap<std::unordered_map<std::string, V, H, E, A>> : std::true_type {};
+
+} // namespace detail
+
+template <class T>
+void packValue(Encoder& enc, const T& value);
+
+template <class T>
+void unpackValue(const Frame& frame, T& out);
+
+namespace detail {
+
+template <class T, std::size_t... I>
+void packFields(Encoder& enc, const T& value, std::index_sequence<I...>) {
+    auto fields = value.tldFields();
+    if constexpr (T::tld_named_fields) {
+        constexpr std::string_view names = T::tldFieldNames();
+        ((enc.writeString(nthFieldName(names, I)),
+          packValue(enc, std::get<I>(fields))),
+         ...);
+    } else {
+        (packValue(enc, std::get<I>(fields)), ...);
+    }
+}
+
+template <class T, std::size_t... I>
+void unpackNamedFields(const Frame& frame, T& out, std::index_sequence<I...>) {
+    auto fields = out.tldFields();
+    constexpr std::string_view names = T::tldFieldNames();
+    for (const Field& field : frame.object()) {
+        // A key matching no member is skipped rather than rejected, so a producer can add
+        // one without every consumer being rebuilt first.
+        ((field.key == nthFieldName(names, I)
+              ? (unpackValue(field.value, std::get<I>(fields)), void())
+              : void()),
+         ...);
+    }
+}
+
+template <class T, std::size_t... I>
+void unpackPositionalFields(const Frame& frame, T& out, std::index_sequence<I...>) {
+    auto fields = out.tldFields();
+    auto range = frame.array();
+    auto it = range.begin();
+    const auto end = range.end();
+    ((it == end ? throw Error(QNNT_TLD_TRUNCATED)
+                : (unpackValue(*it, std::get<I>(fields)), ++it, void())),
+     ...);
+}
+
+} // namespace detail
+
+/// Encode any supported value, including a type carrying one of the macros.
+template <class T>
+void packValue(Encoder& enc, const T& value) {
+    using U = std::remove_cvref_t<T>;
+
+    if constexpr (std::is_same_v<U, bool>) {
+        enc.writeBool(value);
+    } else if constexpr (std::is_enum_v<U>) {
+        // The underlying integer, matching what the Zig and Python sides write. A name
+        // would need a table C++ cannot generate on its own.
+        //
+        // Via the underlying type, not straight to int64: an `enum class F : uint64_t`
+        // with a value above INT64_MAX would otherwise be cast to a negative number and
+        // come back wrong.
+        using Underlying = std::underlying_type_t<U>;
+        if constexpr (std::is_signed_v<Underlying>) {
+            const auto raw = static_cast<std::int64_t>(value);
+            if (raw >= 0) {
+                enc.writeUint(static_cast<std::uint64_t>(raw));
+            } else {
+                enc.writeInt(raw);
+            }
+        } else {
+            enc.writeUint(static_cast<std::uint64_t>(value));
+        }
+    } else if constexpr (std::is_integral_v<U>) {
+        // Non-negative takes the unsigned encoding regardless of the C++ type's
+        // signedness: it is a byte shorter for small values, reads back fine through
+        // asInt, and matches what Zig and Python emit for the same field.
+        if constexpr (std::is_signed_v<U>) {
+            const auto raw = static_cast<std::int64_t>(value);
+            if (raw >= 0) {
+                enc.writeUint(static_cast<std::uint64_t>(raw));
+            } else {
+                enc.writeInt(raw);
+            }
+        } else {
+            enc.writeUint(static_cast<std::uint64_t>(value));
+        }
+    } else if constexpr (std::is_same_v<U, float>) {
+        enc.writeFloat32(value);
+    } else if constexpr (std::is_floating_point_v<U>) {
+        enc.writeFloat(static_cast<double>(value));
+    } else if constexpr (std::is_same_v<U, std::string> ||
+                         std::is_same_v<U, std::string_view>) {
+        enc.writeString(value);
+    } else if constexpr (detail::IsByteVector<U>::value) {
+        // Bytes, not text: a vector<uint8_t> is the C++ way of saying binary.
+        enc.writeBuffer(Bytes{value.data(), value.size()});
+    } else if constexpr (detail::IsOptional<U>::value) {
+        if (value.has_value()) {
+            packValue(enc, *value);
+        } else {
+            enc.writeNull();
+        }
+    } else if constexpr (detail::IsVector<U>::value || detail::IsStdArray<U>::value) {
+        auto scope = enc.beginArray();
+        for (const auto& item : value) packValue(enc, item);
+        scope.close();
+    } else if constexpr (detail::IsStringMap<U>::value) {
+        auto scope = enc.beginObject();
+        for (const auto& [key, item] : value) {
+            enc.writeString(key);
+            packValue(enc, item);
+        }
+        scope.close();
+    } else if constexpr (detail::HasTldFields<U>) {
+        constexpr std::size_t count =
+            std::tuple_size_v<decltype(std::declval<const U&>().tldFields())>;
+        if constexpr (U::tld_named_fields) {
+            auto scope = enc.beginObject();
+            detail::packFields(enc, value, std::make_index_sequence<count>{});
+            scope.close();
+        } else {
+            auto scope = enc.beginArray();
+            detail::packFields(enc, value, std::make_index_sequence<count>{});
+            scope.close();
+        }
+    } else {
+        static_assert(detail::HasTldFields<U>,
+                      "qnnt::tld: type has no mapping. Add QNNT_TLD_DEFINE or "
+                      "QNNT_TLD_DEFINE_MAP to it, or pack its members individually.");
+    }
+}
+
+/// Decode into an existing value.
+template <class T>
+void unpackValue(const Frame& frame, T& out) {
+    using U = std::remove_cvref_t<T>;
+
+    if constexpr (std::is_same_v<U, bool>) {
+        out = frame.asBool();
+    } else if constexpr (std::is_enum_v<U>) {
+        using Underlying = std::underlying_type_t<U>;
+        if constexpr (std::is_signed_v<Underlying>) {
+            out = static_cast<U>(static_cast<Underlying>(frame.asInt()));
+        } else {
+            out = static_cast<U>(static_cast<Underlying>(frame.asUint()));
+        }
+    } else if constexpr (std::is_integral_v<U>) {
+        if constexpr (std::is_signed_v<U>) {
+            out = static_cast<U>(frame.asInt());
+        } else {
+            out = static_cast<U>(frame.asUint());
+        }
+    } else if constexpr (std::is_floating_point_v<U>) {
+        out = static_cast<U>(frame.asFloat());
+    } else if constexpr (std::is_same_v<U, std::string>) {
+        // Either framing is accepted. A string is what pack writes for text, but a
+        // producer in another language may have chosen a buffer for the same field, and
+        // refusing that would be pedantry rather than safety.
+        if (frame.type() == Type::string) {
+            const std::string_view text = frame.asString();
+            out.assign(text);
+        } else {
+            const Bytes raw = frame.asBuffer();
+            out.assign(reinterpret_cast<const char*>(raw.data()), raw.size());
+        }
+    } else if constexpr (detail::IsByteVector<U>::value) {
+        if (frame.type() == Type::string) {
+            const std::string_view text = frame.asString();
+            const auto* first = reinterpret_cast<const std::uint8_t*>(text.data());
+            out.assign(first, first + text.size());
+        } else {
+            const Bytes raw = frame.asBuffer();
+            out.assign(raw.begin(), raw.end());
+        }
+    } else if constexpr (detail::IsOptional<U>::value) {
+        if (frame.isNull()) {
+            out.reset();
+        } else {
+            typename U::value_type inner{};
+            unpackValue(frame, inner);
+            out = std::move(inner);
+        }
+    } else if constexpr (detail::IsVector<U>::value) {
+        out.clear();
+        for (const Frame& item : frame.array()) {
+            typename U::value_type element{};
+            unpackValue(item, element);
+            out.push_back(std::move(element));
+        }
+    } else if constexpr (detail::IsStdArray<U>::value) {
+        std::size_t index = 0;
+        for (const Frame& item : frame.array()) {
+            if (index >= out.size()) throw Error(QNNT_TLD_MALFORMED_CONTAINER);
+            unpackValue(item, out[index++]);
+        }
+        if (index != out.size()) throw Error(QNNT_TLD_TRUNCATED);
+    } else if constexpr (detail::IsStringMap<U>::value) {
+        out.clear();
+        for (const Field& field : frame.object()) {
+            typename U::mapped_type element{};
+            unpackValue(field.value, element);
+            out.emplace(std::string{field.key}, std::move(element));
+        }
+    } else if constexpr (detail::HasTldFields<U>) {
+        constexpr std::size_t count =
+            std::tuple_size_v<decltype(std::declval<const U&>().tldFields())>;
+        if constexpr (U::tld_named_fields) {
+            detail::unpackNamedFields(frame, out, std::make_index_sequence<count>{});
+        } else {
+            detail::unpackPositionalFields(frame, out, std::make_index_sequence<count>{});
+        }
+    } else {
+        static_assert(detail::HasTldFields<U>,
+                      "qnnt::tld: type has no mapping. Add QNNT_TLD_DEFINE or "
+                      "QNNT_TLD_DEFINE_MAP to it.");
+    }
+}
+
+/// Pack a value into a fresh byte vector.
+template <class T>
+[[nodiscard]] std::vector<std::uint8_t> pack(const T& value) {
+    Encoder enc;
+    packValue(enc, value);
+    const Bytes out = enc.bytes();
+    return std::vector<std::uint8_t>{out.begin(), out.end()};
+}
+
+/// Pack into a caller-owned encoder, for putting a value inside a larger frame.
+template <class T>
+void packInto(Encoder& enc, const T& value) {
+    packValue(enc, value);
+}
+
+/// Decode the frame at the start of `bytes` as a `T`.
+template <class T>
+[[nodiscard]] T unpack(Bytes bytes) {
+    T out{};
+    unpackValue(decode(bytes), out);
+    return out;
+}
+
+template <class T>
+[[nodiscard]] T unpack(const std::vector<std::uint8_t>& bytes) {
+    return unpack<T>(Bytes{bytes.data(), bytes.size()});
+}
+
+template <class T>
+[[nodiscard]] T unpack(const Frame& frame) {
+    T out{};
+    unpackValue(frame, out);
+    return out;
+}
+
+/// What `unpack` yields, mirroring msgpack::object closely enough that call sites written
+/// as `unpack(p, n).get().as<T>()` port by changing the namespace and nothing else.
+class Object {
+public:
+    explicit Object(Frame frame) noexcept : f_{frame} {}
+
+    template <class T>
+    [[nodiscard]] T as() const {
+        T out{};
+        unpackValue(f_, out);
+        return out;
+    }
+
+    template <class T>
+    void convert(T& out) const {
+        unpackValue(f_, out);
+    }
+
+    [[nodiscard]] const Frame& frame() const noexcept { return f_; }
+
+private:
+    Frame f_;
+};
+
+/// Mirrors msgpack::object_handle: owns the bytes the frame views, so the Object stays
+/// valid after the caller's buffer is gone. msgpack owns a zone for the same reason.
+class ObjectHandle {
+public:
+    explicit ObjectHandle(Bytes bytes) : owned_{bytes.begin(), bytes.end()} {}
+
+    [[nodiscard]] Object get() const {
+        return Object{decode(Bytes{owned_.data(), owned_.size()})};
+    }
+
+    [[nodiscard]] Bytes bytes() const noexcept { return {owned_.data(), owned_.size()}; }
+
+private:
+    std::vector<std::uint8_t> owned_;
+};
+
+/// `unpack(ptr, len)` in the shape msgpack uses. Prefer `unpack<T>(bytes)` above in new
+/// code -- it skips the copy this one makes to own its buffer.
+[[nodiscard]] inline ObjectHandle unpack(const void* data, std::size_t len) {
+    return ObjectHandle{Bytes{static_cast<const std::uint8_t*>(data), len}};
+}
+
+/// `pack(stream, value)` in the shape msgpack uses, for call sites that already have a
+/// std::ostream (a stringstream, usually) to hand.
+template <class T>
+void pack(std::ostream& out, const T& value) {
+    const std::vector<std::uint8_t> bytes = pack(value);
+    out.write(reinterpret_cast<const char*>(bytes.data()),
+              static_cast<std::streamsize>(bytes.size()));
+}
+
 [[nodiscard]] inline std::string_view version() { return qnnt_tld_version(); }
+
+// ---------------------------------------------------------------- msgpack macro names
+//
+// The same macros under the names a port from msgpack expects, so moving a class over is a
+// search and replace of MSGPACK_ for TLD_ and MSGPACK:: for qnnt::tld:: :
+//
+//     MSGPACK_DEFINE(a, b)        ->  TLD_DEFINE(a, b)          array, positional
+//     MSGPACK_DEFINE_ARRAY(a, b)  ->  TLD_DEFINE_ARRAY(a, b)    the same thing, spelled out
+//     MSGPACK_DEFINE_MAP(a, b)    ->  TLD_DEFINE_MAP(a, b)      object, keys are names
+//     MSGPACK_ADD_ENUM(E)         ->  TLD_ADD_ENUM(E)           optional here; see above
+//     MSGPACK_BASE(B)             ->  TLD_BASE(B)
+//     MSGPACK_NVP("k", m)         ->  TLD_NVP("k", m)
+//     MSGPACK::pack(ss, obj)      ->  qnnt::tld::pack(ss, obj)
+//     MSGPACK::unpack(p, n)       ->  qnnt::tld::unpack(p, n)   .get().as<T>() as before
+//
+// The QNNT_TLD_ spellings remain for headers that would rather not take an unprefixed
+// macro name; the two are identical.
+#define TLD_DEFINE(...) QNNT_TLD_FIELDS_IMPL(false, #__VA_ARGS__, __VA_ARGS__)
+#define TLD_DEFINE_ARRAY(...) QNNT_TLD_FIELDS_IMPL(false, #__VA_ARGS__, __VA_ARGS__)
+#define TLD_DEFINE_MAP(...) QNNT_TLD_FIELDS_IMPL(true, #__VA_ARGS__, __VA_ARGS__)
+#define TLD_ADD_ENUM(EnumType) QNNT_TLD_ADD_ENUM(EnumType)
 
 } // namespace qnnt::tld
 
