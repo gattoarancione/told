@@ -9,11 +9,21 @@
 
 #include "qnnt_tld.hpp"
 
-#include <cassert>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 #include <vector>
+
+// CHECK() vanishes under NDEBUG, which a release build defines -- then every check below
+// would compile away and this example would prove nothing while still exiting 0.
+#define CHECK(cond)                                                                       \
+    do {                                                                                  \
+        if (!(cond)) {                                                                    \
+            std::fprintf(stderr, "  FAILED: %s (%s:%d)\n", #cond, __FILE__, __LINE__);    \
+            return 1;                                                                     \
+        }                                                                                 \
+    } while (0)
 
 enum class Mode : int { idle = 0, running = 1, faulted = 2 };
 TLD_ADD_ENUM(Mode) // optional -- enums work undeclared; this is for msgpack parity
@@ -61,6 +71,28 @@ struct Tagged : Header {
     TLD_DEFINE_MAP(TLD_BASE(Header), TLD_NVP("ch", channel), TLD_NVP("v", value))
 };
 
+// A type whose definition cannot be touched -- stand-in for QString and friends -- taught
+// to the mapping from outside. This is the mechanism the Qt header uses.
+struct Foreign {
+    int a{};
+    int b{};
+};
+
+template <>
+struct qnnt::tld::Adaptor<Foreign> {
+    static void pack(Encoder& enc, const Foreign& v) {
+        // Deliberately not the default shape: two ints as one "a:b" string, to prove the
+        // adaptor is really in charge.
+        char text[32];
+        std::snprintf(text, sizeof text, "%d:%d", v.a, v.b);
+        enc.writeString(text);
+    }
+    static void unpack(const Frame& frame, Foreign& out) {
+        const std::string text{frame.asString()};
+        std::sscanf(text.c_str(), "%d:%d", &out.a, &out.b);
+    }
+};
+
 static Sample canonical() {
     Sample s;
     s.id = 99;
@@ -77,22 +109,22 @@ int main() {
     // 1. round trip
     const std::vector<std::uint8_t> bytes = qnnt::tld::pack(canonical());
     const Sample got = qnnt::tld::unpack<Sample>(bytes);
-    assert(got.id == 99 && got.name == "sensor-a" && got.mode == Mode::faulted);
-    assert(got.readings.size() == 2 && got.readings[1].valid == false);
-    assert((got.raw == std::vector<std::uint8_t>{0x00, 0xFF, 0x0A}));
-    assert(!got.note.has_value());
-    assert(got.origin.x == 1.5 && got.origin.y == -2.5);
+    CHECK(got.id == 99 && got.name == "sensor-a" && got.mode == Mode::faulted);
+    CHECK(got.readings.size() == 2 && got.readings[1].valid == false);
+    CHECK((got.raw == std::vector<std::uint8_t>{0x00, 0xFF, 0x0A}));
+    CHECK(!got.note.has_value());
+    CHECK(got.origin.x == 1.5 && got.origin.y == -2.5);
     printf("  round trip: %zu bytes\n", bytes.size());
 
     // 2. positional is smaller than named for the same data
     const auto named = qnnt::tld::pack(Point{1.0, 2.0}).size();
     const auto positional = qnnt::tld::pack(Vec2{1.0, 2.0}).size();
-    assert(positional < named);
+    CHECK(positional < named);
     printf("  named %zu bytes, positional %zu bytes\n", named, positional);
 
     // 3. enums, including an unsigned 64-bit one
-    assert(qnnt::tld::unpack<Flags>(qnnt::tld::pack(Flags::all)) == Flags::all);
-    assert(qnnt::tld::unpack<Mode>(qnnt::tld::pack(Mode::running)) == Mode::running);
+    CHECK(qnnt::tld::unpack<Flags>(qnnt::tld::pack(Flags::all)) == Flags::all);
+    CHECK(qnnt::tld::unpack<Mode>(qnnt::tld::pack(Mode::running)) == Mode::running);
 
     // 4. base class and renamed keys land on the wire as intended
     Tagged sent;
@@ -103,7 +135,7 @@ int main() {
     qnnt::tld::pack(ss, sent); // the msgpack call shape
     const std::string blob = ss.str();
     const Tagged back = qnnt::tld::unpack(blob.data(), blob.size()).get().as<Tagged>();
-    assert(back.serial == 42 && back.channel == 3 && back.value == 9.5);
+    CHECK(back.serial == 42 && back.channel == 3 && back.value == 9.5);
 
     std::string keys;
     for (const auto& field : qnnt::tld::decode(
@@ -112,7 +144,7 @@ int main() {
              .object()) {
         keys += std::string{field.key} + " ";
     }
-    assert(keys == "Header ch v ");
+    CHECK(keys == "Header ch v ");
     printf("  keys with TLD_BASE and TLD_NVP: %s\n", keys.c_str());
 
     // 5. the golden frame: does C++ read what Zig wrote?
@@ -124,13 +156,22 @@ int main() {
     const std::vector<std::uint8_t> golden((std::istreambuf_iterator<char>(in)),
                                             std::istreambuf_iterator<char>());
     const Sample from_zig = qnnt::tld::unpack<Sample>(golden);
-    assert(from_zig.id == 99 && from_zig.name == "sensor-a");
-    assert(from_zig.mode == Mode::faulted && from_zig.readings.size() == 2);
-    assert(from_zig.origin.y == -2.5);
+    CHECK(from_zig.id == 99 && from_zig.name == "sensor-a");
+    CHECK(from_zig.mode == Mode::faulted && from_zig.readings.size() == 2);
+    CHECK(from_zig.origin.y == -2.5);
 
     // 6. and does C++ write exactly the same bytes?
-    assert(bytes == golden);
+    CHECK(bytes == golden);
     printf("  golden frame: decoded, and re-encoded byte-for-byte identically\n");
+
+    // 7. the adaptor extension point
+    const Foreign foreign{7, 9};
+    const auto foreign_bytes = qnnt::tld::pack(foreign);
+    CHECK(qnnt::tld::decode(qnnt::tld::Bytes{foreign_bytes.data(), foreign_bytes.size()})
+               .type() == qnnt::tld::Type::string);
+    const Foreign foreign_back = qnnt::tld::unpack<Foreign>(foreign_bytes);
+    CHECK(foreign_back.a == 7 && foreign_back.b == 9);
+    printf("  Adaptor specialisation drives encoding for a foreign type\n");
 
     printf("  all C++ struct-mapping checks passed\n");
     return 0;

@@ -589,11 +589,40 @@ struct IsStringMap<std::unordered_map<std::string, V, H, E, A>> : std::true_type
 
 } // namespace detail
 
+/// Specialise this to teach the mapping about a type whose definition you cannot touch --
+/// Qt's QString, a vendor's vector, a legacy struct that must not grow members. msgpack
+/// calls the same idea an adaptor.
+///
+///     template <>
+///     struct qnnt::tld::Adaptor<QString> {
+///         static void pack(Encoder& enc, const QString& v) { enc.writeString(...); }
+///         static void unpack(const Frame& f, QString& out) { out = ...; }
+///     };
+///
+/// An adaptor is consulted before every built-in rule, so it can also override how a type
+/// this header already knows about is encoded.
+template <class T>
+struct Adaptor;
+
 template <class T>
 void packValue(Encoder& enc, const T& value);
 
 template <class T>
 void unpackValue(const Frame& frame, T& out);
+
+namespace detail {
+
+template <class T>
+concept HasPackAdaptor = requires(Encoder& enc, const T& value) {
+    ::qnnt::tld::Adaptor<T>::pack(enc, value);
+};
+
+template <class T>
+concept HasUnpackAdaptor = requires(const Frame& frame, T& out) {
+    ::qnnt::tld::Adaptor<T>::unpack(frame, out);
+};
+
+} // namespace detail
 
 namespace detail {
 
@@ -642,7 +671,9 @@ template <class T>
 void packValue(Encoder& enc, const T& value) {
     using U = std::remove_cvref_t<T>;
 
-    if constexpr (std::is_same_v<U, bool>) {
+    if constexpr (detail::HasPackAdaptor<U>) {
+        Adaptor<U>::pack(enc, value);
+    } else if constexpr (std::is_same_v<U, bool>) {
         enc.writeBool(value);
     } else if constexpr (std::is_enum_v<U>) {
         // The underlying integer, matching what the Zig and Python sides write. A name
@@ -717,8 +748,9 @@ void packValue(Encoder& enc, const T& value) {
         }
     } else {
         static_assert(detail::HasTldFields<U>,
-                      "qnnt::tld: type has no mapping. Add QNNT_TLD_DEFINE or "
-                      "QNNT_TLD_DEFINE_MAP to it, or pack its members individually.");
+                      "qnnt::tld: type has no mapping. Add TLD_DEFINE or "
+                      "TLD_DEFINE_MAP to it, specialise qnnt::tld::Adaptor for it, or "
+                      "pack its members individually.");
     }
 }
 
@@ -727,7 +759,9 @@ template <class T>
 void unpackValue(const Frame& frame, T& out) {
     using U = std::remove_cvref_t<T>;
 
-    if constexpr (std::is_same_v<U, bool>) {
+    if constexpr (detail::HasUnpackAdaptor<U>) {
+        Adaptor<U>::unpack(frame, out);
+    } else if constexpr (std::is_same_v<U, bool>) {
         out = frame.asBool();
     } else if constexpr (std::is_enum_v<U>) {
         using Underlying = std::underlying_type_t<U>;
@@ -803,8 +837,8 @@ void unpackValue(const Frame& frame, T& out) {
         }
     } else {
         static_assert(detail::HasTldFields<U>,
-                      "qnnt::tld: type has no mapping. Add QNNT_TLD_DEFINE or "
-                      "QNNT_TLD_DEFINE_MAP to it.");
+                      "qnnt::tld: type has no mapping. Add TLD_DEFINE, TLD_DEFINE_MAP, or a "
+                      "qnnt::tld::Adaptor specialisation.");
     }
 }
 
