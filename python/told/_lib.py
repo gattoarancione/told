@@ -64,6 +64,20 @@ def load() -> C.CDLL:
     )
 
 
+class EventRecord(C.Structure):
+    """One buffered connection event, as qnnt_poll_events writes it."""
+
+    _fields_ = [
+        ("event", C.c_int),
+        ("topic", C.POINTER(C.c_char)),
+        ("topic_len", C.c_size_t),
+        ("peer", C.POINTER(C.c_char)),
+        ("peer_len", C.c_size_t),
+        ("subscribers", C.c_size_t),
+        ("at_us", C.c_uint64),
+    ]
+
+
 class Message(C.Structure):
     _fields_ = [
         ("topic", C.POINTER(C.c_char)),
@@ -105,6 +119,20 @@ def declare(lib: C.CDLL) -> C.CDLL:
     lib.qnnt_set_realtime_priority.restype = C.c_int
     lib.qnnt_realtime_priority.argtypes = []
     lib.qnnt_realtime_priority.restype = C.c_uint8
+    lib.qnnt_subscriber_count.argtypes = [C.c_char_p, C.c_size_t]
+    lib.qnnt_subscriber_count.restype = C.c_size_t
+    lib.qnnt_wait_for_subscriber.argtypes = [C.c_char_p, C.c_size_t, C.c_uint64]
+    lib.qnnt_wait_for_subscriber.restype = C.c_bool
+    lib.qnnt_wait_for_subscribers.argtypes = [C.c_char_p, C.c_size_t, C.c_size_t, C.c_uint64]
+    lib.qnnt_wait_for_subscribers.restype = C.c_bool
+    lib.qnnt_poll_events.argtypes = [C.POINTER(EventRecord), C.c_size_t, C.POINTER(C.c_size_t)]
+    lib.qnnt_poll_events.restype = C.c_int
+    lib.qnnt_events_dropped.argtypes = []
+    lib.qnnt_events_dropped.restype = C.c_uint64
+    lib.qnnt_set_stale_timeout.argtypes = [C.c_uint64]
+    lib.qnnt_set_stale_timeout.restype = None
+    lib.qnnt_stale_timeout.argtypes = []
+    lib.qnnt_stale_timeout.restype = C.c_uint64
     lib.qnnt_set_lock_memory.argtypes = [C.c_uint8]
     lib.qnnt_set_lock_memory.restype = C.c_int
     lib.qnnt_lock_memory.argtypes = []
