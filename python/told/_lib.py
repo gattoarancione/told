@@ -166,6 +166,10 @@ def declare(lib: C.CDLL) -> C.CDLL:
     lib.qnnt_queue_dropped.argtypes, lib.qnnt_queue_dropped.restype = [], C.c_uint64
     lib.qnnt_subscribe_queue.argtypes = [C.c_char_p, C.c_size_t, C.c_int]
     lib.qnnt_subscribe_queue.restype = C.c_int
+    lib.qnnt_subscribe_pattern_queue.argtypes = [C.c_char_p, C.c_size_t, C.c_int, C.c_uint64]
+    lib.qnnt_subscribe_pattern_queue.restype = C.c_int
+    lib.qnnt_topic_matches.argtypes = [C.c_char_p, C.c_size_t, C.c_char_p, C.c_size_t]
+    lib.qnnt_topic_matches.restype = C.c_bool
     lib.qnnt_poll.argtypes = [C.POINTER(Message), C.c_size_t, C.c_int32, C.POINTER(C.c_size_t)]
     lib.qnnt_poll.restype = C.c_int
 

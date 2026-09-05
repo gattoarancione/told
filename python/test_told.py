@@ -133,6 +133,44 @@ with qnnt.Node(registry_port=DEMO_PORT, queue_capacity=8192) as node:
           f"{(len(text)+len(frames))/max(polls,1):.0f} messages per poll")
 
 
+# ---------------------------------------------------------------- glob subscriptions
+#
+# One queue fed by every topic matching a pattern, including topics that did not exist when
+# the subscription started -- which is the arrangement plain `subscribe` cannot express.
+
+with qnnt.Node(registry_port=DEMO_PORT, queue_capacity=8192) as node:
+    node.publisher("py/bus/alpha")
+    node.publisher("py/busy-elsewhere")  # a near miss: 'py/bus/*' must not take it
+    node.subscribe_pattern("py/bus/*", rescan=0.2)
+
+    # Created AFTER the pattern is already running, so arriving at all proves the rescan
+    # found it rather than the initial listing having caught it.
+    node.publisher("py/bus/beta")
+
+    got = {}
+    deadline = time.time() + 15.0
+    while len(got) < 2 and time.time() < deadline:
+        for topic in ("py/bus/alpha", "py/bus/beta", "py/busy-elsewhere"):
+            node.publish(topic, b"tick\n")
+        for msg in node.poll(timeout=0.1):
+            got.setdefault(msg.topic, 0)
+            got[msg.topic] += 1
+
+    check("glob joins a topic present at the start", got.get("py/bus/alpha", 0) > 0, str(got))
+    check("glob joins a topic that appears later", got.get("py/bus/beta", 0) > 0, str(got))
+    check("glob leaves a near miss alone", "py/busy-elsewhere" not in got, str(got))
+    check("each message says which topic it came from", set(got) <= {"py/bus/alpha", "py/bus/beta"})
+
+    # The same matcher, asked directly -- for a program that routes on the topic, or filters
+    # its own traffic back out.
+    check("the matcher is available to the caller",
+          node.topic_matches("py/bus/*", "py/bus/alpha")
+          and node.topic_matches("py/bus/*", "py/bus/deep/er")  # '*' crosses '/'
+          and node.topic_matches("py/?us/a", "py/bus/a")
+          and not node.topic_matches("py/bus/*", "py/busy-elsewhere")
+          and not node.topic_matches("py/bus/*", "other/bus/a"))
+
+
 # ---------------------------------------------------------------- struct mapping
 #
 # The counterpart of the TLD_DEFINE_MAP macros in C++ and of tld.pack/unpack in Zig. The
