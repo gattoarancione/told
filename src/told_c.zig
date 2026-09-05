@@ -328,25 +328,39 @@ export fn qnnt_tld_write_f64(handle: ?*Encoder, value: f64) callconv(.c) Status 
     return .ok;
 }
 
+/// A caller's (pointer, length) pair as a slice, treating NULL with length 0 as empty.
+///
+/// That combination is how C spells an empty buffer, and both an empty STRING and an empty
+/// BUFFER are legal TLD values. Refusing it made them unrepresentable from C++ without the
+/// caller knowing to substitute a dummy pointer: `std::vector<T>::data()` on an empty
+/// vector is permitted to return null, so `qnnt::tld::pack` of a struct with an empty bytes
+/// field threw invalid_argument -- which for the CAN station meant a frame with no payload,
+/// a legal frame with DLC 0, taking the whole window down with an uncaught exception.
+fn inputSlice(bytes: ?[*]const u8, len: usize) ?[]const u8 {
+    if (len == 0) return &.{};
+    const src = bytes orelse return null;
+    return src[0..len];
+}
+
 /// Rejects invalid UTF-8 rather than emitting a STRING a decoder is entitled to refuse.
 export fn qnnt_tld_write_string(handle: ?*Encoder, bytes: ?[*]const u8, len: usize) callconv(.c) Status {
     var enc = writer(handle) orelse return .invalid_argument;
-    const src = bytes orelse return .invalid_argument;
-    enc.writeString(src[0..len]) catch |err| return statusFor(err);
+    const src = inputSlice(bytes, len) orelse return .invalid_argument;
+    enc.writeString(src) catch |err| return statusFor(err);
     return .ok;
 }
 
 export fn qnnt_tld_write_buffer(handle: ?*Encoder, bytes: ?[*]const u8, len: usize) callconv(.c) Status {
     var enc = writer(handle) orelse return .invalid_argument;
-    const src = bytes orelse return .invalid_argument;
-    enc.writeBuffer(src[0..len]) catch |err| return statusFor(err);
+    const src = inputSlice(bytes, len) orelse return .invalid_argument;
+    enc.writeBuffer(src) catch |err| return statusFor(err);
     return .ok;
 }
 
 export fn qnnt_tld_write_extended(handle: ?*Encoder, code: u8, bytes: ?[*]const u8, len: usize) callconv(.c) Status {
     var enc = writer(handle) orelse return .invalid_argument;
-    const src = bytes orelse return .invalid_argument;
-    enc.writeExtended(code, src[0..len]) catch |err| return statusFor(err);
+    const src = inputSlice(bytes, len) orelse return .invalid_argument;
+    enc.writeExtended(code, src) catch |err| return statusFor(err);
     return .ok;
 }
 
