@@ -77,6 +77,45 @@ typedef struct {
     size_t         raw_len;
 } qnnt_tld_frame;
 
+/*
+ * The layout above is an ABI, not an implementation detail: the Zig side declares the same
+ * struct in lib/tld_abi.zig and hands these out by value across the C boundary. Before
+ * these assertions the agreement was a comment reading "must match", and nothing checked
+ * it -- a field reordered on one side would have been a callback reading a length as a
+ * pointer, at runtime, silently.
+ *
+ * Written against sizeof(void *) rather than as literals so they hold on a 32-bit target
+ * too, where the struct is 20 bytes rather than 40. lib/tld_abi.zig asserts exactly these.
+ *
+ * If one of these fires, do not "fix" it by editing the number: the two declarations have
+ * drifted, and one of them is now wrong about what the other sends.
+ */
+#if defined(__cplusplus)
+#  define QNNT_TLD_ABI_ASSERT(cond, msg) static_assert(cond, msg)
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#  define QNNT_TLD_ABI_ASSERT(cond, msg) _Static_assert(cond, msg)
+#else
+/* Pre-C11 has no compile-time assertion worth using; the Zig side still checks its half. */
+#  define QNNT_TLD_ABI_ASSERT(cond, msg)
+#endif
+
+QNNT_TLD_ABI_ASSERT(offsetof(qnnt_tld_frame, type) == 0, "qnnt_tld_frame.type moved");
+QNNT_TLD_ABI_ASSERT(offsetof(qnnt_tld_frame, mod) == 1, "qnnt_tld_frame.mod moved");
+QNNT_TLD_ABI_ASSERT(offsetof(qnnt_tld_frame, ext_code) == 2, "qnnt_tld_frame.ext_code moved");
+QNNT_TLD_ABI_ASSERT(offsetof(qnnt_tld_frame, data) == sizeof(void *),
+                    "qnnt_tld_frame.data is not one pointer in");
+QNNT_TLD_ABI_ASSERT(offsetof(qnnt_tld_frame, data_len) == 2 * sizeof(void *),
+                    "qnnt_tld_frame.data_len moved");
+QNNT_TLD_ABI_ASSERT(offsetof(qnnt_tld_frame, raw) == 3 * sizeof(void *),
+                    "qnnt_tld_frame.raw moved");
+QNNT_TLD_ABI_ASSERT(offsetof(qnnt_tld_frame, raw_len) == 4 * sizeof(void *),
+                    "qnnt_tld_frame.raw_len moved");
+QNNT_TLD_ABI_ASSERT(sizeof(qnnt_tld_frame) == 5 * sizeof(void *),
+                    "qnnt_tld_frame changed size");
+/* size_t and a pointer must be the same width, or every length above is misread. */
+QNNT_TLD_ABI_ASSERT(sizeof(size_t) == sizeof(void *),
+                    "size_t and void* differ in width on this target");
+
 /* Cursor over a container's unconsumed bytes. Treat the fields as private. */
 typedef struct {
     const uint8_t *rest;

@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const tld = @import("tld.zig");
+const abi = @import("tld_abi.zig");
 const allocator = @import("alloc.zig").allocator;
 
 /// Mirrors qnnt_tld_status in the header. Values are part of the ABI: append, never
@@ -52,18 +53,9 @@ fn statusFor(err: anyerror) Status {
     };
 }
 
-/// Mirrors qnnt_tld_frame. Flat by nature: the zero-copy decoder already reduces a frame
-/// to a type, a mod and two borrowed spans, so no opaque handle is needed here.
-const Frame = extern struct {
-    type: u8,
-    mod: u8,
-    /// The extension type code, or -1 when this is not an EXTENDED frame.
-    ext_code: i16,
-    data: [*]const u8,
-    data_len: usize,
-    raw: [*]const u8,
-    raw_len: usize,
-};
+/// The C ABI frame shape, from the one file that declares it. See lib/tld_abi.zig for why
+/// it is not declared here, and why it cannot simply be imported from the node library.
+const Frame = abi.Frame;
 
 fn toCFrame(f: tld.Frame) Frame {
     return .{
