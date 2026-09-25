@@ -14,7 +14,7 @@
 const std = @import("std");
 const tld = @import("tld.zig");
 const abi = @import("tld_abi.zig");
-const allocator = @import("alloc.zig").allocator;
+const allocator = @import("tld_alloc.zig").allocator;
 
 /// Mirrors qnnt_tld_status in the header. Values are part of the ABI: append, never
 /// renumber.
