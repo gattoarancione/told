@@ -161,6 +161,10 @@ def declare(lib: C.CDLL) -> C.CDLL:
     lib.qnnt_publisher_start.restype = C.c_int
     lib.qnnt_publish.argtypes = [C.c_char_p, C.c_size_t, C.c_void_p, C.c_size_t]
     lib.qnnt_publish.restype = C.c_int
+    lib.qnnt_remove_publisher.argtypes = [C.c_char_p, C.c_size_t]
+    lib.qnnt_remove_publisher.restype = C.c_int
+    lib.qnnt_remove_subscriber.argtypes = [C.c_char_p, C.c_size_t]
+    lib.qnnt_remove_subscriber.restype = C.c_int
 
     lib.qnnt_queue_reserve.argtypes, lib.qnnt_queue_reserve.restype = [C.c_size_t], C.c_int
     lib.qnnt_queue_dropped.argtypes, lib.qnnt_queue_dropped.restype = [], C.c_uint64

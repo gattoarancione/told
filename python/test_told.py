@@ -255,6 +255,40 @@ else:
 print()
 
 
+# --- per-topic teardown ------------------------------------------------------------
+#
+# Exercises qnnt_remove_publisher / qnnt_remove_subscriber through ctypes. Both join the
+# topic's worker threads, so the interesting failure is a hang here, not a wrong answer.
+
+with qnnt.Node(registry_port=DEMO_PORT, queue_capacity=1024) as node:
+    node.publisher("py/going")
+    node.subscribe("py/going")
+    time.sleep(0.4)
+
+    check('remove_subscriber reports it removed something', node.remove_subscriber("py/going"))
+    check('and says so only once', not node.remove_subscriber("py/going"))
+
+    check('remove_publisher reports it removed something', node.remove_publisher("py/going"))
+    check('and says so only once', not node.remove_publisher("py/going"))
+
+    check('the publisher has no subscribers left', node.subscriber_count("py/going") == 0)
+
+    # And the node still works afterwards: removal is not a disguised shutdown.
+    node.publisher("py/after")
+    node.subscribe("py/after")
+    time.sleep(0.4)
+    got, sent, deadline = 0, 0, time.time() + 10.0
+    while got == 0 and time.time() < deadline:
+        for _ in range(20):
+            node.publish("py/after", f"still-here-{sent}\n".encode())
+            sent += 1
+        time.sleep(0.05)
+        got += len(node.poll(timeout=0.2))
+    check('the node still publishes after a removal', got > 0, f"{got} message(s)")
+
+print()
+
+
 try:
     with qnnt.Node(registry_port=DEMO_PORT) as first, qnnt.Node(registry_port=DEMO_PORT) as second:
         check('a second Node is refused', False)
