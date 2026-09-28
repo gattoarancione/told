@@ -289,6 +289,83 @@ with qnnt.Node(registry_port=DEMO_PORT, queue_capacity=1024) as node:
 print()
 
 
+# --- request/reply -----------------------------------------------------------------
+#
+# Exercises the whole C ABI for procedures: serving one from Python (a library thread
+# calling in), calling it blocking, and calling it non-blocking with tickets.
+
+with qnnt.Node(registry_port=DEMO_PORT, queue_capacity=1024) as node:
+    def upper(_procedure, request):
+        return request.upper()
+
+    def refuses(_procedure, _request):
+        return None
+
+    def explodes(_procedure, _request):
+        raise RuntimeError("deliberate: a raising handler is a refusal")
+
+    node.add_responder("py/rpc/upper", upper)
+    node.add_responder("py/rpc/no", refuses)
+    node.add_responder("py/rpc/boom", explodes)
+
+    # Registration is asynchronous, as it is for publishers.
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        try:
+            node.request("py/rpc/upper", b"ping", timeout=1.0)
+            break
+        except qnnt.Error:
+            time.sleep(0.05)
+
+    check('a blocking request returns the reply', node.request("py/rpc/upper", b"abc") == b"ABC")
+    check('an empty request and reply survive the round trip',
+          node.request("py/rpc/upper", b"") == b"")
+
+    try:
+        node.request("py/rpc/no", b"x")
+        check('a refusal is reported as an error', False)
+    except qnnt.Error as err:
+        check('a refusal is reported as an error', err.status == int(qnnt.RpcStatus.refused),
+              str(err))
+
+    # A handler that raises must not take the responder down with it.
+    try:
+        node.request("py/rpc/boom", b"x")
+        check('a raising handler becomes a refusal', False)
+    except qnnt.Error as err:
+        check('a raising handler becomes a refusal',
+              err.status == int(qnnt.RpcStatus.refused))
+    check('and the responder still answers afterwards',
+          node.request("py/rpc/upper", b"still") == b"STILL")
+
+    try:
+        node.request("py/rpc/nobody", b"x", timeout=1.0)
+        check('an unknown procedure is an error', False)
+    except qnnt.Error as err:
+        check('an unknown procedure is an error',
+              err.status == int(qnnt.RpcStatus.no_procedure))
+
+    # Non-blocking: several tickets out at once, each matched to its own reply.
+    sent = {node.request_begin("py/rpc/upper", w): w.upper()
+            for w in (b"alpha", b"beta", b"gamma", b"delta")}
+    check('every request_begin returned a ticket', all(sent))
+
+    got, deadline = {}, time.time() + 10.0
+    while len(got) < len(sent) and time.time() < deadline:
+        for reply in node.poll_replies(timeout=0.2):
+            got[reply.id] = reply
+    check('every non-blocking reply came back', len(got) == len(sent), f"{len(got)}/{len(sent)}")
+    check('each reply matched its own ticket',
+          all(got[i].ok and got[i].data == want for i, want in sent.items()))
+    check('and each knows which procedure answered',
+          all(r.procedure == "py/rpc/upper" for r in got.values()))
+
+    check('remove_responder reports it removed something', node.remove_responder("py/rpc/upper"))
+    check('and says so only once', not node.remove_responder("py/rpc/upper"))
+
+print()
+
+
 try:
     with qnnt.Node(registry_port=DEMO_PORT) as first, qnnt.Node(registry_port=DEMO_PORT) as second:
         check('a second Node is refused', False)

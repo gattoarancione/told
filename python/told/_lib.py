@@ -78,6 +78,19 @@ class EventRecord(C.Structure):
     ]
 
 
+class Reply(C.Structure):
+    """Mirrors qnnt_reply. Pointers stay valid until the next poll_replies."""
+
+    _fields_ = [
+        ("id", C.c_uint64),
+        ("status", C.c_int),
+        ("procedure", C.POINTER(C.c_char)),
+        ("procedure_len", C.c_size_t),
+        ("data", C.POINTER(C.c_ubyte)),
+        ("data_len", C.c_size_t),
+    ]
+
+
 class Message(C.Structure):
     _fields_ = [
         ("topic", C.POINTER(C.c_char)),
@@ -161,6 +174,19 @@ def declare(lib: C.CDLL) -> C.CDLL:
     lib.qnnt_publisher_start.restype = C.c_int
     lib.qnnt_publish.argtypes = [C.c_char_p, C.c_size_t, C.c_void_p, C.c_size_t]
     lib.qnnt_publish.restype = C.c_int
+    lib.qnnt_add_responder.argtypes = [C.c_char_p, C.c_size_t, C.c_void_p, C.c_void_p]
+    lib.qnnt_add_responder.restype = C.c_int
+    lib.qnnt_remove_responder.argtypes = [C.c_char_p, C.c_size_t]
+    lib.qnnt_remove_responder.restype = C.c_int
+    lib.qnnt_request.argtypes = [C.c_char_p, C.c_size_t, C.c_void_p, C.c_size_t,
+                                 C.c_uint64, C.c_void_p, C.c_size_t, C.POINTER(C.c_size_t)]
+    lib.qnnt_request.restype = C.c_int
+    lib.qnnt_request_begin.argtypes = [C.c_char_p, C.c_size_t, C.c_void_p, C.c_size_t, C.c_uint64]
+    lib.qnnt_request_begin.restype = C.c_uint64
+    lib.qnnt_poll_replies.argtypes = [C.POINTER(Reply), C.c_size_t, C.c_int32, C.POINTER(C.c_size_t)]
+    lib.qnnt_poll_replies.restype = C.c_int
+    lib.qnnt_requests_in_flight.argtypes, lib.qnnt_requests_in_flight.restype = [], C.c_size_t
+    lib.qnnt_rpc_status_name.argtypes, lib.qnnt_rpc_status_name.restype = [C.c_int], C.c_char_p
     lib.qnnt_remove_publisher.argtypes = [C.c_char_p, C.c_size_t]
     lib.qnnt_remove_publisher.restype = C.c_int
     lib.qnnt_remove_subscriber.argtypes = [C.c_char_p, C.c_size_t]
