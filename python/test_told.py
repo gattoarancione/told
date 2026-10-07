@@ -85,7 +85,12 @@ print("\nnode: publish and drain")
 # registry, since the build runs its steps in parallel.
 DEMO_PORT = int(os.environ.get("QNNT_REGISTRY_PORT", "22302"))
 
-with qnnt.Node(registry_port=DEMO_PORT, queue_capacity=8192) as node:
+# Small handler stacks, so the registry connections below are served on them.
+with qnnt.Node(registry_port=DEMO_PORT, queue_capacity=8192, handler_stack_bytes=200_000) as node:
+    stack = node._lib.qnnt_handler_stack_bytes()
+    check("handler stack rounded up to a page", stack >= 200_000 and stack % os.sysconf("SC_PAGE_SIZE") == 0,
+          f"got {stack}")
+    check("handler stack fixed once running", node._lib.qnnt_set_handler_stack_bytes(0) != 0)
     node.publisher("py/text")
     node.publisher("py/frames")
     node.subscribe("py/text")
