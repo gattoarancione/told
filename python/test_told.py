@@ -142,8 +142,11 @@ with qnnt.Node(registry_port=DEMO_PORT, queue_capacity=8192, handler_stack_bytes
 #
 # One queue fed by every topic matching a pattern, including topics that did not exist when
 # the subscription started -- which is the arrangement plain `subscribe` cannot express.
+#
+# Over TCP, with local sockets off: the path every remote subscriber takes, kept exercised
+# from Python now that same-host traffic defaults to Unix sockets.
 
-with qnnt.Node(registry_port=DEMO_PORT, queue_capacity=8192) as node:
+with qnnt.Node(registry_port=DEMO_PORT, queue_capacity=8192, local_sockets=False) as node:
     node.publisher("py/bus/alpha")
     node.publisher("py/busy-elsewhere")  # a near miss: 'py/bus/*' must not take it
     node.subscribe_pattern("py/bus/*", rescan=0.2)

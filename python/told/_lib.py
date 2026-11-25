@@ -154,6 +154,12 @@ def declare(lib: C.CDLL) -> C.CDLL:
     lib.qnnt_set_handler_stack_bytes.restype = C.c_int
     lib.qnnt_handler_stack_bytes.argtypes = []
     lib.qnnt_handler_stack_bytes.restype = C.c_size_t
+    lib.qnnt_set_local_sockets.argtypes = [C.c_uint8]
+    lib.qnnt_set_local_sockets.restype = C.c_int
+    lib.qnnt_local_sockets.argtypes = []
+    lib.qnnt_local_sockets.restype = C.c_uint8
+    lib.qnnt_set_socket_dir.argtypes = [C.c_char_p]
+    lib.qnnt_set_socket_dir.restype = C.c_int
     lib.qnnt_registry_port.argtypes, lib.qnnt_registry_port.restype = [], C.c_uint16
 
     for name in ("qnnt_set_advertise_address", "qnnt_set_bind_address", "qnnt_set_cluster_key"):
