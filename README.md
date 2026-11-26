@@ -1,6 +1,11 @@
-# TOLD
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="told-dark.png">
+    <img src="told.png" alt="TOLD" width="480">
+  </picture>
+</p>
 
-**TOLD** — *Typo Lenght Data*. Yes, the typo is the name: a joke on Type-Length-Data.
+<p align="center"><b>Typo-Length Data</b> — superfast binary serialization</p>
 
 A compact binary serialization format in the TLV family, implemented in Zig, with a C ABI,
 a header-only C++ wrapper and a Python package on top. It began life inside qnnt as its frame codec and is
@@ -17,6 +22,10 @@ carved out here as a library of its own.
   `src/testdata/interop.tld`.
 
 ## The wire format, in one screen
+
+The normative definition is [`SPEC.md`](SPEC.md); the design rationale and a comparison
+with JSON, MessagePack, BSON and CBOR are in
+[`doc/TOLD-protocol-paper.md`](doc/TOLD-protocol-paper.md). In short:
 
 A frame is one header byte — high nibble **TYPE**, low nibble **MOD** — then an optional
 length field, then the data. MOD's meaning depends on the type family:

@@ -2,7 +2,7 @@
 
 **Version 1.0**
 
-TOLD (Typo Lenght Data — a play on Type-Length-Data, read as *told*: data is not traded,
+TOLD (Typo-Length Data — a play on Type-Length-Data, read as *told*: data is not traded,
 mangled or structurally exaggerated, it is simply told) is a self-describing binary
 serialization format for streaming structured values over byte streams such as TCP.
 

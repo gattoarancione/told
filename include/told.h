@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Claudio Russo (gattoarancione) */
 
 /*
- * TOLD (Typo Lenght Data) binary streaming protocol, v1.0 -- C interface.
+ * TOLD (Typo-Length Data) binary streaming protocol, v1.0 -- C interface.
  *
  * Hand-written and kept in step with src/told_c.zig by hand, because Zig no longer emits
  * C headers. If you add a symbol there, add it here.

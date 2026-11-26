@@ -5,3 +5,4 @@ __pycache__/
 python/build/
 python/told/_lib/
 fuzz-crash-*.bin
+.DS_Store

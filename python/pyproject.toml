@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "told"
 version = "0.1.0"
-description = "Python interface to TOLD, the Typo Lenght Data binary serialization format"
+description = "Python interface to TOLD, the Typo-Length Data binary serialization format"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "Claudio Russo (gattoarancione)" }]
