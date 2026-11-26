@@ -1,6 +1,6 @@
 # TOLD wire format specification
 
-**Version 1.0**
+**Version 1.1**
 
 TOLD (Typo-Length Data — a play on Type-Length-Data, read as *told*: data is not traded,
 mangled or structurally exaggerated, it is simply told) is a self-describing binary
@@ -45,7 +45,9 @@ The format keeps these invariants. Changes to this specification MUST preserve t
 6. Wire shape and semantic contract are independent: types may share framing yet differ
    in what their data promises (STRING and BUFFER, section 7).
 7. A value that needs no data bytes takes none.
-8. Integers carry only the bytes their magnitude needs; the declared type is a ceiling.
+8. Numbers carry only the bytes that hold information: integers omit leading bytes,
+   restored by sign extension; floats omit trailing zero bytes, restored as zeros. The
+   declared type is a ceiling, not a size.
 9. Containers are measured in bytes, not elements, so any container can be skipped
    without parsing its contents.
 10. A reader can determine a frame's total size from at most its first 9 bytes, without
@@ -63,8 +65,8 @@ The format keeps these invariants. Changes to this specification MUST preserve t
 | `0x4` | INT16 | sized integer | data bytes, 0–2 | MOD bytes |
 | `0x5` | INT32 | sized integer | data bytes, 0–4 | MOD bytes |
 | `0x6` | INT64 | sized integer | data bytes, 0–8 | MOD bytes |
-| `0x7` | FLOAT32 | float | 0 or 4 | MOD bytes |
-| `0x8` | FLOAT64 | float | 0 or 8 | MOD bytes |
+| `0x7` | FLOAT32 | float | leading data bytes, 0–4 | MOD bytes |
+| `0x8` | FLOAT64 | float | leading data bytes, 0–8 | MOD bytes |
 | `0x9` | STRING | variable-length | length or length-of-length (section 7) | UTF-8 text |
 | `0xA` | ARRAY | variable-length | as STRING | child frames |
 | `0xB` | OBJECT | variable-length | as STRING | key/value frame pairs |
@@ -101,15 +103,34 @@ needs one more byte: 200 is `0x42 0x00 0xC8`, not `0x31 0xC8` (which is −56).
 
 ## 6. Floats
 
-FLOAT32 and FLOAT64 data is an IEEE 754 binary32 or binary64 value, big-endian.
+FLOAT32 and FLOAT64 hold an IEEE 754 binary32 or binary64 value, whose bytes are taken
+big-endian: sign and exponent first, the low mantissa bits last.
 
-MOD MUST be 0 or the full width (4 or 8). MOD = 0 encodes positive zero, `+0.0`, in one
-byte. Any other MOD is invalid and decoders MUST reject it: a float is never truncated,
-since trimming mantissa bytes would silently lose precision.
+MOD is the number of leading bytes present, from 0 to the width (4 or 8); decoders MUST
+reject a larger MOD. The bytes not present are the trailing ones, and they are zero: a
+decoder rebuilds the value by appending zero bytes up to the width. MOD = 0 therefore
+encodes positive zero, `+0.0`, in one byte, and the full width carries every bit as it is.
 
-Negative zero is not `+0.0`, so encoders MUST write it at full width:
-`0x88 0x80 0x00 0x00 0x00 0x00 0x00 0x00 0x00`. NaN payloads and infinities are carried
-as their bit patterns.
+Encoders MUST NOT omit a byte that is not zero, so the decoded value is always exactly the
+encoded one; omitting zero bytes loses nothing. Encoders SHOULD omit all trailing zero
+bytes. Values whose mantissa ends in zeros — whole numbers, short binary fractions, ±0,
+infinities, the canonical NaN — shrink the most:
+
+| Value | binary64 | Frame |
+|---|---|---|
+| `+0.0` | `00 00 00 00 00 00 00 00` | `80` |
+| `-0.0` | `80 00 00 00 00 00 00 00` | `81 80` |
+| `1.5` | `3F F8 00 00 00 00 00 00` | `82 3F F8` |
+| `21.5` | `40 35 80 00 00 00 00 00` | `83 40 35 80` |
+| `0.1` | `3F B9 99 99 99 99 99 9A` | `88 3F B9 99 99 99 99 99 9A` |
+
+A zero byte followed by a non-zero one is kept: only the trailing run is omitted. Negative
+zero is not `+0.0`: its sign bit is data, so it keeps its first byte. NaN payloads and
+infinities are carried as their bit patterns.
+
+This is the counterpart of section 5. An integer omits leading bytes, which sign extension
+restores; a float omits trailing bytes, which zero-filling restores. Either way MOD is the
+number of data bytes present.
 
 ## 7. Variable-length types
 
@@ -185,7 +206,7 @@ shortest form of each value:
 
 - TINYUINT for unsigned values 0–15;
 - the fewest data bytes for sized integers (section 5);
-- the one-byte form for `+0.0` (section 6);
+- no trailing zero bytes for floats, so `+0.0` is one byte (section 6);
 - the inline length when L ≤ 7, else the smallest LL (section 7).
 
 A container's length is only known once its contents are written. An encoder MAY write
@@ -243,10 +264,22 @@ resynchronise without an application-level boundary.
 
 ## 13. Versioning
 
-This is version 1.0. A version that adds types will assign the reserved TYPE values or
-EXTENDED MOD values, and will not change the meaning of any frame valid in 1.0, so a 1.0
-decoder rejects new types rather than misreading them. No version information is carried
-on the wire; peers agree on the version out of band.
+This is version 1.1. No version information is carried on the wire; peers agree on the
+version out of band.
+
+A new version may only give meaning to frames the previous version rejects — reserved TYPE
+values, reserved MOD values — and never changes the meaning of a frame the previous version
+accepts. So every frame of an older version decodes identically under a newer one, and an
+older decoder meeting a newer frame rejects it rather than misreading it. An encoder
+talking to peers that may run an older version SHOULD restrict itself to that version's
+frames.
+
+### Version history
+
+- **1.1** — Floats take any MOD from 0 to their width, the omitted trailing bytes being
+  zero (section 6). In 1.0, MOD was 0 or the full width. Every 1.0 frame is a valid 1.1
+  frame with the same value; a 1.0 decoder rejects a partial-width float as an invalid MOD.
+- **1.0** — Initial version.
 
 ## Appendix A. Test vectors
 
@@ -270,9 +303,12 @@ it. Every one decodes back to its value.
 | −2⁶³ | `68 80 00 00 00 00 00 00 00` |
 | 2⁶⁴ − 1, as unsigned (section 11) | `68 FF FF FF FF FF FF FF FF` |
 | +0.0 (FLOAT64) | `80` |
-| −0.0 (FLOAT64) | `88 80 00 00 00 00 00 00 00` |
-| 1.5 (FLOAT64) | `88 3F F8 00 00 00 00 00 00` |
-| 1.5 (FLOAT32) | `74 3F C0 00 00` |
+| −0.0 (FLOAT64) | `81 80` |
+| 1.5 (FLOAT64) | `82 3F F8` |
+| 2.0 (FLOAT64) | `81 40` |
+| 21.5 (FLOAT64) | `83 40 35 80` |
+| 0.1 (FLOAT64) | `88 3F B9 99 99 99 99 99 9A` |
+| 1.5 (FLOAT32) | `72 3F C0` |
 | `""` | `90` |
 | `"hi"` | `92 68 69` |
 | `"abcdefg"` | `97 61 62 63 64 65 66 67` |
@@ -291,6 +327,7 @@ These decode and are legal, though an encoder following section 9 would not writ
 | Encoding | Value | Why not shortest |
 |---|---|---|
 | `52 01 2C` | 300 | INT32 declared where INT16 suffices (section 5) |
+| `88 3F F8 00 00 00 00 00 00` | 1.5 | trailing zero bytes kept, as a 1.0 encoder writes it (section 6) |
 | `07` | null | NULL with MOD ≠ 0, which decoders ignore (section 4) |
 | `98 05 68 65 6C 6C 6F` | `"hello"` | extended length where inline suffices (section 7) |
 
@@ -300,7 +337,8 @@ These MUST be rejected:
 |---|---|
 | `12` | BOOL with MOD 2 |
 | `32` | INT8 with MOD 2, above its width |
-| `72` | FLOAT32 with partial width |
+| `75` | FLOAT32 with MOD 5, above its width |
+| `89` | FLOAT64 with MOD 9, above its width |
 | `D0`, `E0` | reserved TYPE |
 | `F1 42` | EXTENDED with MOD ≠ 0 |
 | `52 01` | INT32 declaring 2 data bytes, 1 present |

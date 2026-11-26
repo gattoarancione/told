@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Claudio Russo (gattoarancione)
 
-// TOLD (Typo-Length Data) v1.0 -- header-only C++ wrapper over the C ABI in told.h.
+// TOLD (Typo-Length Data) v1.1 -- header-only C++ wrapper over the C ABI in told.h.
 //
 // It adds the three things the C interface cannot express, and nothing else:
 //

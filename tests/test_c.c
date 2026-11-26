@@ -100,7 +100,7 @@ static void test_zero_length_ints_decode_to_zero(void) {
 
 static void test_mod_above_the_width_is_invalid(void) {
     const uint8_t cases[][2] = {{0x32, 0}, {0x43, 0}, {0x55, 0}, {0x69, 0},
-                                {0x72, 0}, {0x84, 0}, {0xF1, 0x42}};
+                                {0x75, 0}, {0x89, 0}, {0xF1, 0x42}};
     told_frame f;
     for (size_t k = 0; k < sizeof cases / sizeof cases[0]; k++)
         CHECK(told_decode(cases[k], 2, &f) == TOLD_INVALID_MOD);
@@ -108,11 +108,12 @@ static void test_mod_above_the_width_is_invalid(void) {
 
 /* --- floats ---------------------------------------------------------------------- */
 
-static void test_floats_zero_is_one_byte_else_full_width(void) {
+static void test_floats_drop_trailing_zero_bytes(void) {
     ENCODES_AS(told_write_f64(enc, 0.0), 0x80);
     ENCODES_AS(told_write_f32(enc, 0.0f), 0x70);
-    ENCODES_AS(told_write_f64(enc, 1.5), 0x88, 0x3F, 0xF8, 0, 0, 0, 0, 0, 0);
-    ENCODES_AS(told_write_f32(enc, 1.5f), 0x74, 0x3F, 0xC0, 0, 0);
+    ENCODES_AS(told_write_f64(enc, 1.5), 0x82, 0x3F, 0xF8);
+    ENCODES_AS(told_write_f64(enc, 0.1), 0x88, 0x3F, 0xB9, 0x99, 0x99, 0x99, 0x99, 0x99, 0x9A);
+    ENCODES_AS(told_write_f32(enc, 1.5f), 0x72, 0x3F, 0xC0);
 
     size_t len;
     told_frame f = decoded(encoded(&len), len);
@@ -120,8 +121,18 @@ static void test_floats_zero_is_one_byte_else_full_width(void) {
     CHECK(told_as_f64(&f, &d) == TOLD_OK && d == 1.5); /* FLOAT32 widens */
 }
 
+static void test_partial_floats_are_zero_filled(void) {
+    const uint8_t two[] = {0x81, 0x40};
+    const uint8_t full[] = {0x88, 0x3F, 0xF8, 0, 0, 0, 0, 0, 0}; /* as a 1.0 encoder wrote it */
+    double d = 0;
+    told_frame f = decoded(two, sizeof two);
+    CHECK(told_as_f64(&f, &d) == TOLD_OK && d == 2.0);
+    f = decoded(full, sizeof full);
+    CHECK(told_as_f64(&f, &d) == TOLD_OK && d == 1.5);
+}
+
 static void test_negative_zero_keeps_its_sign(void) {
-    ENCODES_AS(told_write_f64(enc, -0.0), 0x88, 0x80, 0, 0, 0, 0, 0, 0, 0);
+    ENCODES_AS(told_write_f64(enc, -0.0), 0x81, 0x80);
     size_t len;
     told_frame f = decoded(encoded(&len), len);
     double d = 1;
@@ -411,7 +422,7 @@ static void test_every_status_has_a_name(void) {
         CHECK(name != NULL && name[0] != '\0');
     }
     CHECK(strcmp(told_status_name(TOLD_END_OF_STREAM), "end of stream") == 0);
-    CHECK(strcmp(told_version(), "1.0") == 0);
+    CHECK(strcmp(told_version(), "1.1") == 0);
 }
 
 /* --- struct mapping -------------------------------------------------------------- */
@@ -640,7 +651,8 @@ int main(void) {
     RUN(test_u64_above_i64_reads_back_unsigned);
     RUN(test_zero_length_ints_decode_to_zero);
     RUN(test_mod_above_the_width_is_invalid);
-    RUN(test_floats_zero_is_one_byte_else_full_width);
+    RUN(test_floats_drop_trailing_zero_bytes);
+    RUN(test_partial_floats_are_zero_filled);
     RUN(test_negative_zero_keeps_its_sign);
     RUN(test_strings_inline_up_to_seven_bytes);
     RUN(test_null_with_zero_length_is_an_empty_value);

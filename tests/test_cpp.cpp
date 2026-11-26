@@ -124,8 +124,8 @@ void test_write_names_are_explicit() {
     enc.writeFloat32(1.5f);
     enc.writeFloat(-0.0);
     const auto bytes = enc.bytes();
-    EXPECT_BYTES(bytes.data(), bytes.size(), 0x94, 't', 'e', 'x', 't', 0x31, 0xFF, 0x74, 0x3F,
-                 0xC0, 0x00, 0x00, 0x88, 0x80, 0, 0, 0, 0, 0, 0, 0);
+    EXPECT_BYTES(bytes.data(), bytes.size(), 0x94, 't', 'e', 'x', 't', 0x31, 0xFF, 0x72, 0x3F,
+                 0xC0, 0x81, 0x80);
 }
 
 void test_invalid_utf8_write_throws() {
@@ -238,8 +238,7 @@ void test_struct_packs_like_the_c_descriptor_does() {
 
 void test_positional_struct_has_no_keys() {
     const auto bytes = told::pack(Point{1.5, 0.0});
-    EXPECT_BYTES(bytes.data(), bytes.size(), 0xA8, 0x0A, 0x88, 0x3F, 0xF8, 0, 0, 0, 0, 0, 0,
-                 0x80);
+    EXPECT_BYTES(bytes.data(), bytes.size(), 0xA4, 0x82, 0x3F, 0xF8, 0x80);
     CHECK((told::unpack<Point>(bytes) == Point{1.5, 0.0}));
 }
 

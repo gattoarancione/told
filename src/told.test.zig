@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Claudio Russo (gattoarancione)
 
-//! Tests for the TOLD v1.0 implementation. The byte-level cases are taken straight
+//! Tests for the TOLD v1.1 implementation. The byte-level cases are taken straight
 //! from the specification's worked examples, so a regression shows up as a mismatch
 //! against the spec rather than against a previous implementation's opinion.
 
@@ -162,11 +162,15 @@ test "MOD above the type width is invalid" {
     try testing.expectError(error.InvalidMod, told.decode(&.{ 0x43, 0, 0, 0 })); // INT16, MOD=3
     try testing.expectError(error.InvalidMod, told.decode(&.{ 0x55, 0, 0, 0, 0, 0 })); // INT32, MOD=5
     try testing.expectError(error.InvalidMod, told.decode(&.{ 0x69, 0, 0, 0, 0, 0, 0, 0, 0, 0 })); // INT64, MOD=9
+    try testing.expectError(error.InvalidMod, told.decode(&.{ 0x75, 0, 0, 0, 0, 0 })); // FLOAT32, MOD=5
+    try testing.expectError(error.InvalidMod, told.decode(&.{ 0x89, 0, 0, 0, 0, 0, 0, 0, 0, 0 })); // FLOAT64, MOD=9
+    try testing.expectError(error.InvalidMod, told.frameSize(&.{0x7F}));
 }
 
 // ---------------------------------------------------------------- section 6
 
-test "floats: MOD 0 is the one-byte zero, full width otherwise" {
+test "floats drop their trailing zero bytes" {
+    // Section 6: MOD counts the leading bytes kept. +0.0 keeps none.
     try expectEncoding(&.{0x70}, struct {
         fn f(e: *told.Encoder) anyerror!void {
             try e.writeFloat32(0.0);
@@ -177,44 +181,58 @@ test "floats: MOD 0 is the one-byte zero, full width otherwise" {
             try e.writeFloat64(0.0);
         }
     }.f);
-
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(allocator);
-    var enc = told.Encoder.init(allocator, &out);
-    try enc.writeFloat64(1.5);
-    try testing.expectEqual(@as(usize, 9), out.items.len);
-    try testing.expectEqual(@as(u8, 0x88), out.items[0]);
-    try testing.expectEqual(@as(f64, 1.5), try (try told.decode(out.items)).asFloat());
+    // 1.5 is 3F F8 00 00 00 00 00 00 as binary64: six zero bytes go.
+    try expectEncoding(&.{ 0x82, 0x3F, 0xF8 }, struct {
+        fn f(e: *told.Encoder) anyerror!void {
+            try e.writeFloat64(1.5);
+        }
+    }.f);
+    try expectEncoding(&.{ 0x72, 0x3F, 0xC0 }, struct {
+        fn f(e: *told.Encoder) anyerror!void {
+            try e.writeFloat32(1.5);
+        }
+    }.f);
+    // 21.5 is 40 35 80 00 ...: a zero inside the kept bytes stays, only trailing ones go.
+    try expectEncoding(&.{ 0x83, 0x40, 0x35, 0x80 }, struct {
+        fn f(e: *told.Encoder) anyerror!void {
+            try e.writeFloat64(21.5);
+        }
+    }.f);
+    // A mantissa with no trailing zeros keeps its full width, as in 1.0.
+    try expectEncoding(&.{ 0x88, 0x3F, 0xB9, 0x99, 0x99, 0x99, 0x99, 0x99, 0x9A }, struct {
+        fn f(e: *told.Encoder) anyerror!void {
+            try e.writeFloat64(0.1);
+        }
+    }.f);
 }
 
-test "partial-width floats are rejected" {
-    // Section 6 disallows truncating an IEEE-754 mantissa.
-    for ([_]u4{ 1, 2, 3, 5, 8, 15 }) |mod| {
-        var buf: [16]u8 = @splat(0);
-        buf[0] = told.headerByte(.float32, mod);
-        try testing.expectError(error.InvalidMod, told.decode(&buf));
-    }
-    for ([_]u4{ 1, 4, 7, 9, 15 }) |mod| {
-        var buf: [16]u8 = @splat(0);
-        buf[0] = told.headerByte(.float64, mod);
-        try testing.expectError(error.InvalidMod, told.decode(&buf));
-    }
+test "partial-width floats are zero-filled on decode" {
+    // Every MOD up to the width is legal, and the omitted bytes read back as zeros.
+    try testing.expectEqual(@as(f64, 1.5), try (try told.decode(&.{ 0x82, 0x3F, 0xF8 })).asF64());
+    try testing.expectEqual(@as(f32, 1.5), try (try told.decode(&.{ 0x72, 0x3F, 0xC0 })).asF32());
+    try testing.expectEqual(@as(f64, 2.0), try (try told.decode(&.{ 0x81, 0x40 })).asF64());
+    try testing.expectEqual(@as(?usize, 3), try told.frameSize(&.{0x82}));
+
+    // A 1.0 encoder's full-width frames, and any width between, decode the same.
+    const full = [_]u8{ 0x88, 0x3F, 0xF8, 0, 0, 0, 0, 0, 0 };
+    const part = [_]u8{ 0x84, 0x3F, 0xF8, 0, 0 };
+    try testing.expectEqual(@as(f64, 1.5), try (try told.decode(&full)).asF64());
+    try testing.expectEqual(@as(f64, 1.5), try (try told.decode(&part)).asF64());
 }
 
 test "negative zero keeps its sign instead of collapsing to the one-byte form" {
-    // -0.0 == 0.0 is true, so a naive zero check would silently drop the sign bit.
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(allocator);
-    var enc = told.Encoder.init(allocator, &out);
-    try enc.writeFloat64(-0.0);
-
-    try testing.expectEqual(@as(usize, 9), out.items.len);
-    const decoded = try (try told.decode(out.items)).asF64();
-    try testing.expect(std.math.signbit(decoded));
+    // -0.0 == 0.0 is true, but its sign bit is data: 80 00 .. keeps one byte.
+    try expectEncoding(&.{ 0x81, 0x80 }, struct {
+        fn f(e: *told.Encoder) anyerror!void {
+            try e.writeFloat64(-0.0);
+        }
+    }.f);
+    try testing.expect(std.math.signbit(try (try told.decode(&.{ 0x81, 0x80 })).asF64()));
+    try testing.expect(std.math.signbit(try (try told.decode(&.{ 0x71, 0x80 })).asF32()));
 }
 
 test "float round-trip" {
-    for ([_]f64{ 1.5, -1.5, 3.141592653589793, 1e300, -1e-300, std.math.inf(f64) }) |v| {
+    for ([_]f64{ 1.5, -1.5, 3.141592653589793, 1e300, -1e-300, 0x1p-1074, std.math.inf(f64), -std.math.inf(f64) }) |v| {
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(allocator);
         var enc = told.Encoder.init(allocator, &out);

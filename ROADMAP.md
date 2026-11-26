@@ -5,7 +5,7 @@ each item says what it buys and what it costs, so the choices can be made delibe
 
 ## The specification
 
-The format is specified in [`SPEC.md`](SPEC.md), version 1.0, with the rationale in
+The format is specified in [`SPEC.md`](SPEC.md), version 1.1, with the rationale in
 [`doc/TOLD-protocol-paper.md`](doc/TOLD-protocol-paper.md). Every wire-format change
 below amends the spec and bumps its version.
 
@@ -13,7 +13,7 @@ below amends the spec and bumps its version.
 
 - Inline values: null, true/false and the integers 0–15 are one byte.
 - Integers carry only the bytes they need; the declared width is only a ceiling.
-- `0.0` is one byte; any other float is its full width.
+- Floats omit their trailing zero bytes (1.1): `0.0` is one byte, `1.5` three, `-0.0` two.
 - Strings, buffers and containers up to 7 bytes need no length field; longer ones use the
   shortest of 1–8 length bytes.
 - Zero-copy decoding: frames borrow the caller's bytes, nothing is allocated.
@@ -38,7 +38,7 @@ an old decoder would silently read any new meaning there as null.
 
 | # | Change | Gain |
 |---|---|---|
-| 7 | **Lossless float narrowing**: a float64 exactly representable as float32 is written as one | 4 bytes saved per value like `1.5` or `-0.25`; every existing decoder reads it |
+| 7 | **Float64 narrowing**, the remainder of the original #7: write a float64 exactly representable as float32 as one, when that is shorter. Trailing-zero floats (done in 1.1) already captured most of the gain; narrowing still saves a byte on values like `21.5` (`83 40 35 80` → `72 41 AC`). It changes the declared type, so readers that insist on FLOAT64 need to accept either | Occasionally one more byte |
 | 8 | **No memmove on container close**: `end()` currently shifts the container's whole contents to insert its header. Reserve the header space up front, or add `beginArray(len)` for callers that know the count | Nested containers stop costing depth × size in moves |
 | 9 | **Python decodes in one call**: `told.loads` crosses into C several times per value, which its own docstring calls fine for messages but not for megabytes. One call returning a flat token list would end that | Large-frame decoding in Python, by an estimated order of magnitude; to be measured |
 | 10 | **SIMD UTF-8 validation** in `validate` and `asString` | Faster text-heavy frames |
@@ -46,8 +46,9 @@ an old decoder would silently read any new meaning there as null.
 
 ## Suggested order
 
-1. **#8 and #7.** No compatibility risk, measurable gains, and the fuzzers and the
-   four-language golden frame catch any regression.
+1. **#8.** No compatibility risk, measurable gains, and the fuzzers and the four-language
+   golden frame catch any regression. (Trailing-zero floats, the bulk of #7, shipped in
+   1.1: the golden frame went from 151 to 127 bytes.)
 2. **#5.** Backward-compatible, and removes the only frame nothing can skip.
 3. **Decide what `0xD` and `0xE` are for.** The recommendation: `0xD` for typed arrays (#1),
    the best fit for qnnt's sensor payloads, and `0xE` for integers that #2 and #3 share —

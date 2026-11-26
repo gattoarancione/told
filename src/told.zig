@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Claudio Russo (gattoarancione)
 
-//! TOLD (Typo-Length Data) binary streaming protocol, v1.0.
+//! TOLD (Typo-Length Data) binary streaming protocol, v1.1.
 //!
 //! A frame is one header byte — high nibble TYPE, low nibble MOD — followed by an
 //! optional length field and the data. What MOD means depends on the type family:
@@ -21,7 +21,7 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
-pub const version = "1.0";
+pub const version = "1.1";
 
 /// Type nibble. Spec section 3.
 pub const Type = enum(u4) {
@@ -51,7 +51,8 @@ pub const Type = enum(u4) {
         inline_value,
         /// MOD is the data byte count, 0..width (section 5).
         sized_int,
-        /// MOD is 0 (value 0.0) or the full width; nothing between (section 6).
+        /// MOD is the count of leading data bytes, 0..width; the missing trailing bytes
+        /// are zero (section 6).
         sized_float,
         /// MOD <= 7 is the length; MOD >= 8 gives a length-of-length (section 7).
         variable,
@@ -90,7 +91,7 @@ pub const Error = error{
     /// Fewer bytes present than the header/length field says the frame needs.
     Truncated,
     /// MOD is not a legal value for this type: BOOL above 1, a sized type above its
-    /// width, or a partial-width float (sections 4-6).
+    /// width, or EXTENDED with MOD other than 0 (sections 4-6, 8).
     InvalidMod,
     /// Type nibble 0xD or 0xE.
     ReservedType,
@@ -176,14 +177,14 @@ pub const Frame = struct {
 
     pub fn asF32(f: Frame) Error!f32 {
         if (f.type != .float32) return error.TypeMismatch;
-        if (f.data.len == 0) return 0.0;
-        return @bitCast(std.mem.readInt(u32, f.data[0..4], .big));
+        const be = try zeroFilled(4, f.data);
+        return @bitCast(std.mem.readInt(u32, &be, .big));
     }
 
     pub fn asF64(f: Frame) Error!f64 {
         if (f.type != .float64) return error.TypeMismatch;
-        if (f.data.len == 0) return 0.0;
-        return @bitCast(std.mem.readInt(u64, f.data[0..8], .big));
+        const be = try zeroFilled(8, f.data);
+        return @bitCast(std.mem.readInt(u64, &be, .big));
     }
 
     /// Either float width, widened to f64.
@@ -271,6 +272,16 @@ pub const ObjectIterator = struct {
     }
 };
 
+/// A float's leading bytes with the trailing ones it omitted put back as zeros (section 6).
+/// `data` is never longer than the width from `decode`, but a C caller can hand in any
+/// frame, so the bound is checked rather than assumed.
+fn zeroFilled(comptime width: usize, data: []const u8) Error![width]u8 {
+    if (data.len > width) return error.InvalidMod;
+    var be: [width]u8 = @splat(0);
+    @memcpy(be[0..data.len], data);
+    return be;
+}
+
 fn signExtend(data: []const u8) i64 {
     if (data.len == 0) return 0; // L = 0 decodes to 0 (section 5)
     // Seed with the sign bit repeated, then shift the bytes in: for L < 8 that leaves
@@ -309,16 +320,11 @@ pub fn decode(bytes: []const u8) Error!Frame {
             if (header.type == .bool and header.mod > 1) return error.InvalidMod;
         },
 
-        .sized_int => {
+        // Integers keep their leading bytes by sign extension (section 5), floats their
+        // trailing ones by zero-filling (section 6); either way MOD is the data length.
+        .sized_int, .sized_float => {
             if (header.mod > header.type.width()) return error.InvalidMod;
             data_len = header.mod;
-        },
-
-        .sized_float => {
-            // Section 6: 0 or full width only. Truncating a mantissa would be lossy,
-            // so partial widths are rejected rather than tolerated.
-            const w = header.type.width();
-            data_len = if (header.mod == 0) 0 else if (header.mod == w) w else return error.InvalidMod;
         },
 
         .variable => {
@@ -369,15 +375,9 @@ pub fn frameSize(bytes: []const u8) Error!?usize {
             if (header.type == .bool and header.mod > 1) return error.InvalidMod;
             return 1;
         },
-        .sized_int => {
+        .sized_int, .sized_float => {
             if (header.mod > header.type.width()) return error.InvalidMod;
             return 1 + @as(usize, header.mod);
-        },
-        .sized_float => {
-            const w = header.type.width();
-            if (header.mod == 0) return 1;
-            if (header.mod != w) return error.InvalidMod;
-            return 1 + @as(usize, w);
         },
         .variable => {
             if (header.mod <= 7) return 1 + @as(usize, header.mod);
@@ -519,25 +519,26 @@ pub const Encoder = struct {
     }
 
     pub fn writeFloat32(e: *Encoder, v: f32) Allocator.Error!void {
-        const bits: u32 = @bitCast(v);
-        // Only +0.0 gets the one-byte form: -0.0 compares equal to 0.0 but its sign
-        // bit is real data, and section 6 defines MOD=0 as 0.0.
-        if (bits == 0) return e.header(.float32, 0);
-
-        try e.header(.float32, 4);
         var be: [4]u8 = undefined;
-        std.mem.writeInt(u32, &be, bits, .big);
-        try e.out.appendSlice(e.allocator, &be);
+        std.mem.writeInt(u32, &be, @bitCast(v), .big);
+        try e.floatFrame(.float32, &be);
     }
 
     pub fn writeFloat64(e: *Encoder, v: f64) Allocator.Error!void {
-        const bits: u64 = @bitCast(v);
-        if (bits == 0) return e.header(.float64, 0);
-
-        try e.header(.float64, 8);
         var be: [8]u8 = undefined;
-        std.mem.writeInt(u64, &be, bits, .big);
-        try e.out.appendSlice(e.allocator, &be);
+        std.mem.writeInt(u64, &be, @bitCast(v), .big);
+        try e.floatFrame(.float64, &be);
+    }
+
+    /// A float's bytes without their trailing zeros, which the decoder puts back
+    /// (section 6). Round numbers lose most of their mantissa this way -- 1.5 as FLOAT64
+    /// is 3 bytes, not 9 -- and only zeros are dropped, so nothing is lost. +0.0 comes out
+    /// as the bare header; -0.0, whose sign bit is data, as two bytes.
+    fn floatFrame(e: *Encoder, t: Type, be: []const u8) Allocator.Error!void {
+        var n = be.len;
+        while (n > 0 and be[n - 1] == 0) n -= 1;
+        try e.header(t, @intCast(n));
+        try e.out.appendSlice(e.allocator, be[0..n]);
     }
 
     fn varFrame(e: *Encoder, t: Type, payload: []const u8) Allocator.Error!void {
@@ -628,18 +629,9 @@ pub fn readFrame(
             if (header.type == .bool and header.mod > 1) return error.InvalidMod;
         },
 
-        .sized_int => {
+        .sized_int, .sized_float => {
             if (header.mod > header.type.width()) return error.InvalidMod;
             data_len = header.mod;
-        },
-
-        .sized_float => {
-            const w = header.type.width();
-            if (header.mod == 0) {
-                data_len = 0;
-            } else if (header.mod == w) {
-                data_len = w;
-            } else return error.InvalidMod;
         },
 
         .variable => {
