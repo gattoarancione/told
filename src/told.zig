@@ -1,4 +1,4 @@
-//! TLD (Type-Length-Data) binary streaming protocol, v1.0.
+//! TOLD (Typo Lenght Data) binary streaming protocol, v1.0.
 //!
 //! A frame is one header byte — high nibble TYPE, low nibble MOD — followed by an
 //! optional length field and the data. What MOD means depends on the type family:
@@ -11,7 +11,8 @@
 //! (which appends to a caller-owned list) and `readFrame` (which buffers one frame off
 //! a stream).
 //!
-//! This module has no dependency on the rest of qnnt and can be used on its own.
+//! This module depends on nothing but std. It is the `told` module in build.zig; the C ABI
+//! over it is `told_c.zig`.
 
 const std = @import("std");
 const Io = std.Io;
@@ -723,12 +724,12 @@ pub fn stringify(frame: Frame, allocator: Allocator, out: *std.ArrayList(u8), ma
 }
 
 test {
-    _ = @import("./tld.test.zig");
+    _ = @import("./told.test.zig");
 }
 
 // ---------------------------------------------------------------- struct mapping
 //
-// Packing a Zig value straight to TLD and back, the way msgpack's pack/unpack work on a
+// Packing a Zig value straight to TOLD and back, the way msgpack's pack/unpack work on a
 // C++ object. Zig needs no macros and no descriptor tables for this: @typeInfo gives the
 // field names and types at compile time, so `pack` and `unpack` below are ordinary
 // recursive functions over the type rather than over a schema someone has to maintain.
@@ -752,7 +753,7 @@ test {
 // in the frame are ignored, so a producer may add fields without breaking older consumers,
 // while a field missing from the frame is an error unless the struct gives it a default.
 
-/// Wrap a byte slice to pack it as a TLD buffer rather than a string. `[]const u8` alone
+/// Wrap a byte slice to pack it as a TOLD buffer rather than a string. `[]const u8` alone
 /// is ambiguous -- text far more often than not -- so this is how binary says so.
 pub const Bytes = struct {
     data: []const u8,
@@ -814,7 +815,7 @@ pub fn pack(e: *Encoder, value: anytype) PackError!void {
                 for (value) |item| try pack(e, item);
                 return e.end(mark);
             },
-            else => @compileError("tld.pack: cannot pack " ++ @typeName(T)),
+            else => @compileError("told.pack: cannot pack " ++ @typeName(T)),
         },
 
         .array => |arr| {
@@ -841,7 +842,7 @@ pub fn pack(e: *Encoder, value: anytype) PackError!void {
         },
 
         .@"union" => |un| {
-            if (un.tag_type == null) @compileError("tld.pack: untagged union " ++ @typeName(T));
+            if (un.tag_type == null) @compileError("told.pack: untagged union " ++ @typeName(T));
             const mark = e.beginObject();
             switch (value) {
                 inline else => |payload, tag| {
@@ -854,7 +855,7 @@ pub fn pack(e: *Encoder, value: anytype) PackError!void {
 
         .void => return e.writeNull(),
 
-        else => @compileError("tld.pack: unsupported type " ++ @typeName(T)),
+        else => @compileError("told.pack: unsupported type " ++ @typeName(T)),
     }
 }
 
@@ -917,7 +918,7 @@ pub fn unpack(comptime T: type, frame: Frame, allocator: ?Allocator) UnpackError
                 }
                 return try list.toOwnedSlice(alloc);
             },
-            else => @compileError("tld.unpack: cannot unpack into " ++ @typeName(T)),
+            else => @compileError("told.unpack: cannot unpack into " ++ @typeName(T)),
         },
 
         .array => |arr| {
@@ -977,7 +978,7 @@ pub fn unpack(comptime T: type, frame: Frame, allocator: ?Allocator) UnpackError
 
         .@"union" => |un| {
             const Tag = un.tag_type orelse
-                @compileError("tld.unpack: untagged union " ++ @typeName(T));
+                @compileError("told.unpack: untagged union " ++ @typeName(T));
 
             var it = frame.objectIterator() catch return error.TypeMismatch;
             const pair = (try it.next()) orelse return error.TypeMismatch;
@@ -993,7 +994,7 @@ pub fn unpack(comptime T: type, frame: Frame, allocator: ?Allocator) UnpackError
 
         .void => return {},
 
-        else => @compileError("tld.unpack: unsupported type " ++ @typeName(T)),
+        else => @compileError("told.unpack: unsupported type " ++ @typeName(T)),
     }
 }
 

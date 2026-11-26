@@ -1,13 +1,13 @@
-// Struct mapping in C++: the TLD_* macros, the msgpack-shaped call surface, and a check
+// Struct mapping in C++: the TOLD_* macros, the msgpack-shaped call surface, and a check
 // that this side agrees byte-for-byte with the Zig and Python mappings.
 //
-//   zig build tld-map
+//   zig build told-map
 //
-// The interesting assertions are the last two: the golden frame in lib/testdata was
+// The interesting assertions are the last two: the golden frame in src/testdata was
 // produced by the Zig mapping, and this file both decodes it and reproduces it exactly.
 // If that ever stops holding, a C++ producer and a Zig consumer have stopped agreeing.
 
-#include "qnnt_tld.hpp"
+#include "told.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -26,7 +26,7 @@
     } while (0)
 
 enum class Mode : int { idle = 0, running = 1, faulted = 2 };
-TLD_ADD_ENUM(Mode) // optional -- enums work undeclared; this is for msgpack parity
+TOLD_ADD_ENUM(Mode) // optional -- enums work undeclared; this is for msgpack parity
 
 // An unsigned underlying type, whose top value does not fit in int64.
 enum class Flags : std::uint64_t { none = 0, all = 0xFFFFFFFFFFFFFFFFull };
@@ -35,12 +35,12 @@ struct Reading {
     std::uint8_t channel{};
     double value{};
     bool valid{true};
-    TLD_DEFINE_MAP(channel, value, valid)
+    TOLD_DEFINE_MAP(channel, value, valid)
 };
 
 struct Point {
     double x{}, y{};
-    TLD_DEFINE_MAP(x, y)
+    TOLD_DEFINE_MAP(x, y)
 };
 
 struct Sample {
@@ -51,24 +51,24 @@ struct Sample {
     std::vector<std::uint8_t> raw;
     std::optional<std::string> note;
     Point origin;
-    TLD_DEFINE_MAP(id, name, mode, readings, raw, note, origin)
+    TOLD_DEFINE_MAP(id, name, mode, readings, raw, note, origin)
 };
 
 // Positional: two doubles, no keys on the wire.
 struct Vec2 {
     double x{}, y{};
-    TLD_DEFINE(x, y)
+    TOLD_DEFINE(x, y)
 };
 
 // A base class and explicit short keys.
 struct Header {
     int serial{};
-    TLD_DEFINE_MAP(serial)
+    TOLD_DEFINE_MAP(serial)
 };
 struct Tagged : Header {
     std::uint8_t channel{};
     double value{};
-    TLD_DEFINE_MAP(TLD_BASE(Header), TLD_NVP("ch", channel), TLD_NVP("v", value))
+    TOLD_DEFINE_MAP(TOLD_BASE(Header), TOLD_NVP("ch", channel), TOLD_NVP("v", value))
 };
 
 // A type whose definition cannot be touched -- stand-in for QString and friends -- taught
@@ -79,7 +79,7 @@ struct Foreign {
 };
 
 template <>
-struct qnnt::tld::Adaptor<Foreign> {
+struct told::Adaptor<Foreign> {
     static void pack(Encoder& enc, const Foreign& v) {
         // Deliberately not the default shape: two ints as one "a:b" string, to prove the
         // adaptor is really in charge.
@@ -107,8 +107,8 @@ static Sample canonical() {
 
 int main() {
     // 1. round trip
-    const std::vector<std::uint8_t> bytes = qnnt::tld::pack(canonical());
-    const Sample got = qnnt::tld::unpack<Sample>(bytes);
+    const std::vector<std::uint8_t> bytes = told::pack(canonical());
+    const Sample got = told::unpack<Sample>(bytes);
     CHECK(got.id == 99 && got.name == "sensor-a" && got.mode == Mode::faulted);
     CHECK(got.readings.size() == 2 && got.readings[1].valid == false);
     CHECK((got.raw == std::vector<std::uint8_t>{0x00, 0xFF, 0x0A}));
@@ -117,14 +117,14 @@ int main() {
     printf("  round trip: %zu bytes\n", bytes.size());
 
     // 2. positional is smaller than named for the same data
-    const auto named = qnnt::tld::pack(Point{1.0, 2.0}).size();
-    const auto positional = qnnt::tld::pack(Vec2{1.0, 2.0}).size();
+    const auto named = told::pack(Point{1.0, 2.0}).size();
+    const auto positional = told::pack(Vec2{1.0, 2.0}).size();
     CHECK(positional < named);
     printf("  named %zu bytes, positional %zu bytes\n", named, positional);
 
     // 3. enums, including an unsigned 64-bit one
-    CHECK(qnnt::tld::unpack<Flags>(qnnt::tld::pack(Flags::all)) == Flags::all);
-    CHECK(qnnt::tld::unpack<Mode>(qnnt::tld::pack(Mode::running)) == Mode::running);
+    CHECK(told::unpack<Flags>(told::pack(Flags::all)) == Flags::all);
+    CHECK(told::unpack<Mode>(told::pack(Mode::running)) == Mode::running);
 
     // 4. base class and renamed keys land on the wire as intended
     Tagged sent;
@@ -132,30 +132,30 @@ int main() {
     sent.channel = 3;
     sent.value = 9.5;
     std::stringstream ss;
-    qnnt::tld::pack(ss, sent); // the msgpack call shape
+    told::pack(ss, sent); // the msgpack call shape
     const std::string blob = ss.str();
-    const Tagged back = qnnt::tld::unpack(blob.data(), blob.size()).get().as<Tagged>();
+    const Tagged back = told::unpack(blob.data(), blob.size()).get().as<Tagged>();
     CHECK(back.serial == 42 && back.channel == 3 && back.value == 9.5);
 
     std::string keys;
-    for (const auto& field : qnnt::tld::decode(
-             qnnt::tld::Bytes{reinterpret_cast<const std::uint8_t*>(blob.data()),
+    for (const auto& field : told::decode(
+             told::Bytes{reinterpret_cast<const std::uint8_t*>(blob.data()),
                               blob.size()})
              .object()) {
         keys += std::string{field.key} + " ";
     }
     CHECK(keys == "Header ch v ");
-    printf("  keys with TLD_BASE and TLD_NVP: %s\n", keys.c_str());
+    printf("  keys with TOLD_BASE and TOLD_NVP: %s\n", keys.c_str());
 
     // 5. the golden frame: does C++ read what Zig wrote?
-    std::ifstream in("lib/testdata/interop.tld", std::ios::binary);
+    std::ifstream in("src/testdata/interop.tld", std::ios::binary);
     if (!in) {
         printf("  golden frame not found (run from the project root) -- skipped\n");
         return 0;
     }
     const std::vector<std::uint8_t> golden((std::istreambuf_iterator<char>(in)),
                                             std::istreambuf_iterator<char>());
-    const Sample from_zig = qnnt::tld::unpack<Sample>(golden);
+    const Sample from_zig = told::unpack<Sample>(golden);
     CHECK(from_zig.id == 99 && from_zig.name == "sensor-a");
     CHECK(from_zig.mode == Mode::faulted && from_zig.readings.size() == 2);
     CHECK(from_zig.origin.y == -2.5);
@@ -166,10 +166,10 @@ int main() {
 
     // 7. the adaptor extension point
     const Foreign foreign{7, 9};
-    const auto foreign_bytes = qnnt::tld::pack(foreign);
-    CHECK(qnnt::tld::decode(qnnt::tld::Bytes{foreign_bytes.data(), foreign_bytes.size()})
-               .type() == qnnt::tld::Type::string);
-    const Foreign foreign_back = qnnt::tld::unpack<Foreign>(foreign_bytes);
+    const auto foreign_bytes = told::pack(foreign);
+    CHECK(told::decode(told::Bytes{foreign_bytes.data(), foreign_bytes.size()})
+               .type() == told::Type::string);
+    const Foreign foreign_back = told::unpack<Foreign>(foreign_bytes);
     CHECK(foreign_back.a == 7 && foreign_back.b == 9);
     printf("  Adaptor specialisation drives encoding for a foreign type\n");
 

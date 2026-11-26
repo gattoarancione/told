@@ -1,10 +1,10 @@
-//! C ABI for the TLD codec. Every symbol here is `export ... callconv(.c)` and every
+//! C ABI for the TOLD codec. Every symbol here is `export ... callconv(.c)` and every
 //! signature is expressible in C: slices become (pointer, length) pairs, error unions
 //! become status codes, and the one stateful type — the encoder — becomes an opaque
-//! handle. The declarations must stay in step with `include/qnnt_tld.h`, which is
+//! handle. The declarations must stay in step with `include/told.h`, which is
 //! hand-written because Zig no longer emits C headers.
 //!
-//! TLD is the natural first thing to expose: `tld.zig` has no globals, no threads and no
+//! TOLD is the natural first thing to expose: `told.zig` has no globals, no threads and no
 //! `Io` outside `readFrame`, so this layer needs no lifecycle of its own.
 //!
 //! Decoding stays zero-copy across the boundary. A frame's `data`/`raw` pointers borrow
@@ -12,11 +12,11 @@
 //! owns the bytes throughout and nothing is copied in either direction.
 
 const std = @import("std");
-const tld = @import("tld.zig");
-const abi = @import("tld_abi.zig");
-const allocator = @import("tld_alloc.zig").allocator;
+const told = @import("told.zig");
+const abi = @import("told_abi.zig");
+const allocator = @import("told_alloc.zig").allocator;
 
-/// Mirrors qnnt_tld_status in the header. Values are part of the ABI: append, never
+/// Mirrors told_status in the header. Values are part of the ABI: append, never
 /// renumber.
 const Status = enum(c_int) {
     ok = 0,
@@ -30,7 +30,7 @@ const Status = enum(c_int) {
     type_mismatch = 8,
     extension_framing_unknown = 9,
     out_of_memory = 10,
-    /// `qnnt_tld_frame_size` only: the prefix is too short to tell yet, read more bytes.
+    /// `told_frame_size` only: the prefix is too short to tell yet, read more bytes.
     incomplete = 11,
     /// A null pointer where one was required.
     invalid_argument = 12,
@@ -53,11 +53,11 @@ fn statusFor(err: anyerror) Status {
     };
 }
 
-/// The C ABI frame shape, from the one file that declares it. See lib/tld_abi.zig for why
+/// The C ABI frame shape, from the one file that declares it. See src/told_abi.zig for why
 /// it is not declared here, and why it cannot simply be imported from the node library.
 const Frame = abi.Frame;
 
-fn toCFrame(f: tld.Frame) Frame {
+fn toCFrame(f: told.Frame) Frame {
     return .{
         .type = @intFromEnum(f.type),
         .mod = f.mod,
@@ -69,7 +69,7 @@ fn toCFrame(f: tld.Frame) Frame {
     };
 }
 
-fn fromCFrame(f: *const Frame) tld.Frame {
+fn fromCFrame(f: *const Frame) told.Frame {
     return .{
         .type = @enumFromInt(f.type),
         .mod = @truncate(f.mod),
@@ -80,7 +80,7 @@ fn fromCFrame(f: *const Frame) tld.Frame {
     };
 }
 
-/// Mirrors qnnt_tld_iter: a cursor over the not-yet-consumed bytes of a container.
+/// Mirrors told_iter: a cursor over the not-yet-consumed bytes of a container.
 const Iter = extern struct {
     rest: [*]const u8,
     rest_len: usize,
@@ -88,11 +88,11 @@ const Iter = extern struct {
 
 // ---------------------------------------------------------------- decoding
 
-export fn qnnt_tld_decode(bytes: ?[*]const u8, len: usize, out: ?*Frame) callconv(.c) Status {
+export fn told_decode(bytes: ?[*]const u8, len: usize, out: ?*Frame) callconv(.c) Status {
     const src = bytes orelse return .invalid_argument;
     const dst = out orelse return .invalid_argument;
 
-    const frame = tld.decode(src[0..len]) catch |err| return statusFor(err);
+    const frame = told.decode(src[0..len]) catch |err| return statusFor(err);
     dst.* = toCFrame(frame);
     return .ok;
 }
@@ -100,47 +100,47 @@ export fn qnnt_tld_decode(bytes: ?[*]const u8, len: usize, out: ?*Frame) callcon
 /// Total size of the frame starting at `bytes`, or `incomplete` when the prefix is too
 /// short to say. This is what lets a C reader buffer exactly one frame off a socket
 /// without parsing it: at most 9 bytes are needed to decide.
-export fn qnnt_tld_frame_size(bytes: ?[*]const u8, len: usize, out: ?*usize) callconv(.c) Status {
+export fn told_frame_size(bytes: ?[*]const u8, len: usize, out: ?*usize) callconv(.c) Status {
     const src = bytes orelse return .invalid_argument;
     const dst = out orelse return .invalid_argument;
 
-    const size = tld.frameSize(src[0..len]) catch |err| return statusFor(err);
+    const size = told.frameSize(src[0..len]) catch |err| return statusFor(err);
     dst.* = size orelse return .incomplete;
     return .ok;
 }
 
 /// Walk a whole frame, checking nested frames, UTF-8 in strings and object shape.
-/// `qnnt_tld_decode` only validates the outermost frame, so use this on untrusted input.
-export fn qnnt_tld_validate(bytes: ?[*]const u8, len: usize, max_depth: usize) callconv(.c) Status {
+/// `told_decode` only validates the outermost frame, so use this on untrusted input.
+export fn told_validate(bytes: ?[*]const u8, len: usize, max_depth: usize) callconv(.c) Status {
     const src = bytes orelse return .invalid_argument;
-    _ = tld.validate(src[0..len], max_depth) catch |err| return statusFor(err);
+    _ = told.validate(src[0..len], max_depth) catch |err| return statusFor(err);
     return .ok;
 }
 
 // ---------------------------------------------------------------- accessors
 
-export fn qnnt_tld_as_bool(frame: ?*const Frame, out: ?*bool) callconv(.c) Status {
+export fn told_as_bool(frame: ?*const Frame, out: ?*bool) callconv(.c) Status {
     const f = frame orelse return .invalid_argument;
     const dst = out orelse return .invalid_argument;
     dst.* = fromCFrame(f).asBool() catch |err| return statusFor(err);
     return .ok;
 }
 
-export fn qnnt_tld_as_i64(frame: ?*const Frame, out: ?*i64) callconv(.c) Status {
+export fn told_as_i64(frame: ?*const Frame, out: ?*i64) callconv(.c) Status {
     const f = frame orelse return .invalid_argument;
     const dst = out orelse return .invalid_argument;
     dst.* = fromCFrame(f).asInt() catch |err| return statusFor(err);
     return .ok;
 }
 
-export fn qnnt_tld_as_u64(frame: ?*const Frame, out: ?*u64) callconv(.c) Status {
+export fn told_as_u64(frame: ?*const Frame, out: ?*u64) callconv(.c) Status {
     const f = frame orelse return .invalid_argument;
     const dst = out orelse return .invalid_argument;
     dst.* = fromCFrame(f).asUint() catch |err| return statusFor(err);
     return .ok;
 }
 
-export fn qnnt_tld_as_f64(frame: ?*const Frame, out: ?*f64) callconv(.c) Status {
+export fn told_as_f64(frame: ?*const Frame, out: ?*f64) callconv(.c) Status {
     const f = frame orelse return .invalid_argument;
     const dst = out orelse return .invalid_argument;
     dst.* = fromCFrame(f).asFloat() catch |err| return statusFor(err);
@@ -148,7 +148,7 @@ export fn qnnt_tld_as_f64(frame: ?*const Frame, out: ?*f64) callconv(.c) Status 
 }
 
 /// STRING payload, UTF-8 validated. Borrows the caller's buffer; nothing is copied.
-export fn qnnt_tld_as_string(frame: ?*const Frame, ptr: ?*[*]const u8, len: ?*usize) callconv(.c) Status {
+export fn told_as_string(frame: ?*const Frame, ptr: ?*[*]const u8, len: ?*usize) callconv(.c) Status {
     const f = frame orelse return .invalid_argument;
     const p = ptr orelse return .invalid_argument;
     const l = len orelse return .invalid_argument;
@@ -160,7 +160,7 @@ export fn qnnt_tld_as_string(frame: ?*const Frame, ptr: ?*[*]const u8, len: ?*us
 }
 
 /// BUFFER payload: opaque bytes, no encoding contract.
-export fn qnnt_tld_as_buffer(frame: ?*const Frame, ptr: ?*[*]const u8, len: ?*usize) callconv(.c) Status {
+export fn told_as_buffer(frame: ?*const Frame, ptr: ?*[*]const u8, len: ?*usize) callconv(.c) Status {
     const f = frame orelse return .invalid_argument;
     const p = ptr orelse return .invalid_argument;
     const l = len orelse return .invalid_argument;
@@ -173,7 +173,7 @@ export fn qnnt_tld_as_buffer(frame: ?*const Frame, ptr: ?*[*]const u8, len: ?*us
 
 // ---------------------------------------------------------------- iteration
 
-export fn qnnt_tld_array_iter(frame: ?*const Frame, out: ?*Iter) callconv(.c) Status {
+export fn told_array_iter(frame: ?*const Frame, out: ?*Iter) callconv(.c) Status {
     const f = frame orelse return .invalid_argument;
     const dst = out orelse return .invalid_argument;
 
@@ -182,7 +182,7 @@ export fn qnnt_tld_array_iter(frame: ?*const Frame, out: ?*Iter) callconv(.c) St
     return .ok;
 }
 
-export fn qnnt_tld_object_iter(frame: ?*const Frame, out: ?*Iter) callconv(.c) Status {
+export fn told_object_iter(frame: ?*const Frame, out: ?*Iter) callconv(.c) Status {
     const f = frame orelse return .invalid_argument;
     const dst = out orelse return .invalid_argument;
 
@@ -193,12 +193,12 @@ export fn qnnt_tld_object_iter(frame: ?*const Frame, out: ?*Iter) callconv(.c) S
 
 /// Next array element. `*have` is false at the end, which is the loop condition; the
 /// status is reserved for genuinely malformed input.
-export fn qnnt_tld_array_next(iter: ?*Iter, out: ?*Frame, have: ?*bool) callconv(.c) Status {
+export fn told_array_next(iter: ?*Iter, out: ?*Frame, have: ?*bool) callconv(.c) Status {
     const cursor = iter orelse return .invalid_argument;
     const dst = out orelse return .invalid_argument;
     const flag = have orelse return .invalid_argument;
 
-    var zig_it: tld.Iterator = .{ .rest = cursor.rest[0..cursor.rest_len] };
+    var zig_it: told.Iterator = .{ .rest = cursor.rest[0..cursor.rest_len] };
     const next = zig_it.next() catch |err| {
         flag.* = false;
         return statusFor(err);
@@ -215,7 +215,7 @@ export fn qnnt_tld_array_next(iter: ?*Iter, out: ?*Frame, have: ?*bool) callconv
 }
 
 /// Next object key/value pair, in wire order, which section 7.3 makes significant.
-export fn qnnt_tld_object_next(
+export fn told_object_next(
     iter: ?*Iter,
     key: ?*[*]const u8,
     key_len: ?*usize,
@@ -228,7 +228,7 @@ export fn qnnt_tld_object_next(
     const v = value orelse return .invalid_argument;
     const flag = have orelse return .invalid_argument;
 
-    var zig_it: tld.ObjectIterator = .{ .rest = cursor.rest[0..cursor.rest_len] };
+    var zig_it: told.ObjectIterator = .{ .rest = cursor.rest[0..cursor.rest_len] };
     const next = zig_it.next() catch |err| {
         flag.* = false;
         return statusFor(err);
@@ -249,72 +249,72 @@ export fn qnnt_tld_object_next(
 // ---------------------------------------------------------------- encoding
 
 /// The encoder is the one piece with state, so it crosses as an opaque handle. It owns
-/// its buffer; the caller borrows the bytes via `qnnt_tld_encoder_bytes` and must copy
+/// its buffer; the caller borrows the bytes via `told_encoder_bytes` and must copy
 /// them before the next write, since appending may reallocate.
 const Encoder = struct {
     list: std.ArrayList(u8),
 };
 
-export fn qnnt_tld_encoder_create() callconv(.c) ?*Encoder {
+export fn told_encoder_create() callconv(.c) ?*Encoder {
     const enc = allocator.create(Encoder) catch return null;
     enc.* = .{ .list = .empty };
     return enc;
 }
 
-export fn qnnt_tld_encoder_destroy(handle: ?*Encoder) callconv(.c) void {
+export fn told_encoder_destroy(handle: ?*Encoder) callconv(.c) void {
     const enc = handle orelse return; // free(NULL) is a no-op, so this one is too
     enc.list.deinit(allocator);
     allocator.destroy(enc);
 }
 
 /// Drop the contents, keeping the capacity — for reusing one encoder per message.
-export fn qnnt_tld_encoder_reset(handle: ?*Encoder) callconv(.c) void {
+export fn told_encoder_reset(handle: ?*Encoder) callconv(.c) void {
     const enc = handle orelse return;
     enc.list.clearRetainingCapacity();
 }
 
-export fn qnnt_tld_encoder_bytes(handle: ?*const Encoder, len: ?*usize) callconv(.c) ?[*]const u8 {
+export fn told_encoder_bytes(handle: ?*const Encoder, len: ?*usize) callconv(.c) ?[*]const u8 {
     const enc = handle orelse return null;
     if (len) |l| l.* = enc.list.items.len;
     return enc.list.items.ptr;
 }
 
-fn writer(handle: ?*Encoder) ?tld.Encoder {
+fn writer(handle: ?*Encoder) ?told.Encoder {
     const enc = handle orelse return null;
-    return tld.Encoder.init(allocator, &enc.list);
+    return told.Encoder.init(allocator, &enc.list);
 }
 
-export fn qnnt_tld_write_null(handle: ?*Encoder) callconv(.c) Status {
+export fn told_write_null(handle: ?*Encoder) callconv(.c) Status {
     var enc = writer(handle) orelse return .invalid_argument;
     enc.writeNull() catch |err| return statusFor(err);
     return .ok;
 }
 
-export fn qnnt_tld_write_bool(handle: ?*Encoder, value: bool) callconv(.c) Status {
+export fn told_write_bool(handle: ?*Encoder, value: bool) callconv(.c) Status {
     var enc = writer(handle) orelse return .invalid_argument;
     enc.writeBool(value) catch |err| return statusFor(err);
     return .ok;
 }
 
-export fn qnnt_tld_write_u64(handle: ?*Encoder, value: u64) callconv(.c) Status {
+export fn told_write_u64(handle: ?*Encoder, value: u64) callconv(.c) Status {
     var enc = writer(handle) orelse return .invalid_argument;
     enc.writeUint(value) catch |err| return statusFor(err);
     return .ok;
 }
 
-export fn qnnt_tld_write_i64(handle: ?*Encoder, value: i64) callconv(.c) Status {
+export fn told_write_i64(handle: ?*Encoder, value: i64) callconv(.c) Status {
     var enc = writer(handle) orelse return .invalid_argument;
     enc.writeInt(value) catch |err| return statusFor(err);
     return .ok;
 }
 
-export fn qnnt_tld_write_f32(handle: ?*Encoder, value: f32) callconv(.c) Status {
+export fn told_write_f32(handle: ?*Encoder, value: f32) callconv(.c) Status {
     var enc = writer(handle) orelse return .invalid_argument;
     enc.writeFloat32(value) catch |err| return statusFor(err);
     return .ok;
 }
 
-export fn qnnt_tld_write_f64(handle: ?*Encoder, value: f64) callconv(.c) Status {
+export fn told_write_f64(handle: ?*Encoder, value: f64) callconv(.c) Status {
     var enc = writer(handle) orelse return .invalid_argument;
     enc.writeFloat64(value) catch |err| return statusFor(err);
     return .ok;
@@ -323,9 +323,9 @@ export fn qnnt_tld_write_f64(handle: ?*Encoder, value: f64) callconv(.c) Status 
 /// A caller's (pointer, length) pair as a slice, treating NULL with length 0 as empty.
 ///
 /// That combination is how C spells an empty buffer, and both an empty STRING and an empty
-/// BUFFER are legal TLD values. Refusing it made them unrepresentable from C++ without the
+/// BUFFER are legal TOLD values. Refusing it made them unrepresentable from C++ without the
 /// caller knowing to substitute a dummy pointer: `std::vector<T>::data()` on an empty
-/// vector is permitted to return null, so `qnnt::tld::pack` of a struct with an empty bytes
+/// vector is permitted to return null, so `told::pack` of a struct with an empty bytes
 /// field threw invalid_argument -- which for the CAN station meant a frame with no payload,
 /// a legal frame with DLC 0, taking the whole window down with an uncaught exception.
 fn inputSlice(bytes: ?[*]const u8, len: usize) ?[]const u8 {
@@ -335,21 +335,21 @@ fn inputSlice(bytes: ?[*]const u8, len: usize) ?[]const u8 {
 }
 
 /// Rejects invalid UTF-8 rather than emitting a STRING a decoder is entitled to refuse.
-export fn qnnt_tld_write_string(handle: ?*Encoder, bytes: ?[*]const u8, len: usize) callconv(.c) Status {
+export fn told_write_string(handle: ?*Encoder, bytes: ?[*]const u8, len: usize) callconv(.c) Status {
     var enc = writer(handle) orelse return .invalid_argument;
     const src = inputSlice(bytes, len) orelse return .invalid_argument;
     enc.writeString(src) catch |err| return statusFor(err);
     return .ok;
 }
 
-export fn qnnt_tld_write_buffer(handle: ?*Encoder, bytes: ?[*]const u8, len: usize) callconv(.c) Status {
+export fn told_write_buffer(handle: ?*Encoder, bytes: ?[*]const u8, len: usize) callconv(.c) Status {
     var enc = writer(handle) orelse return .invalid_argument;
     const src = inputSlice(bytes, len) orelse return .invalid_argument;
     enc.writeBuffer(src) catch |err| return statusFor(err);
     return .ok;
 }
 
-export fn qnnt_tld_write_extended(handle: ?*Encoder, code: u8, bytes: ?[*]const u8, len: usize) callconv(.c) Status {
+export fn told_write_extended(handle: ?*Encoder, code: u8, bytes: ?[*]const u8, len: usize) callconv(.c) Status {
     var enc = writer(handle) orelse return .invalid_argument;
     const src = inputSlice(bytes, len) orelse return .invalid_argument;
     enc.writeExtended(code, src) catch |err| return statusFor(err);
@@ -359,27 +359,27 @@ export fn qnnt_tld_write_extended(handle: ?*Encoder, code: u8, bytes: ?[*]const 
 // A container's length is only known once its children are written, so the header is
 // inserted at the end. The mark is just the offset where the container started — a plain
 // size_t in C, with separate array/object closers so the type cannot be lost.
-export fn qnnt_tld_begin_array(handle: ?*Encoder, mark: ?*usize) callconv(.c) Status {
+export fn told_begin_array(handle: ?*Encoder, mark: ?*usize) callconv(.c) Status {
     var enc = writer(handle) orelse return .invalid_argument;
     const m = mark orelse return .invalid_argument;
     m.* = enc.beginArray().start;
     return .ok;
 }
 
-export fn qnnt_tld_begin_object(handle: ?*Encoder, mark: ?*usize) callconv(.c) Status {
+export fn told_begin_object(handle: ?*Encoder, mark: ?*usize) callconv(.c) Status {
     var enc = writer(handle) orelse return .invalid_argument;
     const m = mark orelse return .invalid_argument;
     m.* = enc.beginObject().start;
     return .ok;
 }
 
-export fn qnnt_tld_end_array(handle: ?*Encoder, mark: usize) callconv(.c) Status {
+export fn told_end_array(handle: ?*Encoder, mark: usize) callconv(.c) Status {
     var enc = writer(handle) orelse return .invalid_argument;
     enc.end(.{ .start = mark, .type = .array }) catch |err| return statusFor(err);
     return .ok;
 }
 
-export fn qnnt_tld_end_object(handle: ?*Encoder, mark: usize) callconv(.c) Status {
+export fn told_end_object(handle: ?*Encoder, mark: usize) callconv(.c) Status {
     var enc = writer(handle) orelse return .invalid_argument;
     enc.end(.{ .start = mark, .type = .object }) catch |err| return statusFor(err);
     return .ok;
@@ -387,7 +387,7 @@ export fn qnnt_tld_end_object(handle: ?*Encoder, mark: usize) callconv(.c) Statu
 
 // ---------------------------------------------------------------- diagnostics
 
-export fn qnnt_tld_status_name(status: Status) callconv(.c) [*:0]const u8 {
+export fn told_status_name(status: Status) callconv(.c) [*:0]const u8 {
     return switch (status) {
         .ok => "ok",
         .truncated => "truncated",
@@ -406,15 +406,15 @@ export fn qnnt_tld_status_name(status: Status) callconv(.c) [*:0]const u8 {
     };
 }
 
-export fn qnnt_tld_version() callconv(.c) [*:0]const u8 {
-    return tld.version;
+export fn told_version() callconv(.c) [*:0]const u8 {
+    return told.version;
 }
 
 // ---------------------------------------------------------------- struct mapping
 //
 // C has neither templates nor reflection, so a struct describes itself once as a table of
 // fields and the generic pack/unpack below walk it. This is the same idea as the C++
-// TLD_DEFINE_MAP macros and the Zig comptime mapping, expressed the only way C allows:
+// TOLD_DEFINE_MAP macros and the Zig comptime mapping, expressed the only way C allows:
 // offsetof, a kind tag, and a size.
 //
 // Deliberate limits, because C has no container to decode into:
@@ -478,7 +478,7 @@ const StructDesc = extern struct {
 
 // Spelled out rather than inferred: packStruct and packField call each other for nested
 // structs, and Zig cannot infer an error set through that cycle.
-const MapError = tld.Error || tld.Encoder.WriteError || error{
+const MapError = told.Error || told.Encoder.WriteError || error{
     OutOfRange,
     InvalidArgument,
 };
@@ -503,7 +503,7 @@ fn writeScalar(comptime T: type, ptr: [*]u8, value: T) void {
     @memcpy(ptr[0..@sizeOf(T)], std.mem.asBytes(&value));
 }
 
-fn packScalar(enc: *tld.Encoder, kind: FieldKind, ptr: [*]const u8) MapError!void {
+fn packScalar(enc: *told.Encoder, kind: FieldKind, ptr: [*]const u8) MapError!void {
     switch (kind) {
         .boolean => try enc.writeBool(readScalar(bool, ptr)),
         // Non-negative values take the unsigned encoding, matching the other languages so
@@ -522,12 +522,12 @@ fn packScalar(enc: *tld.Encoder, kind: FieldKind, ptr: [*]const u8) MapError!voi
     }
 }
 
-fn packSigned(enc: *tld.Encoder, value: anytype) MapError!void {
+fn packSigned(enc: *told.Encoder, value: anytype) MapError!void {
     if (value >= 0) return enc.writeUint(@intCast(value));
     return enc.writeInt(@intCast(value));
 }
 
-fn unpackScalar(kind: FieldKind, frame: tld.Frame, ptr: [*]u8) MapError!void {
+fn unpackScalar(kind: FieldKind, frame: told.Frame, ptr: [*]u8) MapError!void {
     switch (kind) {
         .boolean => writeScalar(bool, ptr, try frame.asBool()),
         .i8 => writeScalar(i8, ptr, std.math.cast(i8, try frame.asInt()) orelse return error.OutOfRange),
@@ -544,7 +544,7 @@ fn unpackScalar(kind: FieldKind, frame: tld.Frame, ptr: [*]u8) MapError!void {
     }
 }
 
-fn packField(enc: *tld.Encoder, field: *const FieldDesc, base: ?*const anyopaque) MapError!void {
+fn packField(enc: *told.Encoder, field: *const FieldDesc, base: ?*const anyopaque) MapError!void {
     const ptr = constFieldPtr(base, field.offset);
 
     switch (field.kind) {
@@ -580,7 +580,7 @@ fn packField(enc: *tld.Encoder, field: *const FieldDesc, base: ?*const anyopaque
     }
 }
 
-fn unpackField(field: *const FieldDesc, frame: tld.Frame, base: ?*anyopaque) MapError!void {
+fn unpackField(field: *const FieldDesc, frame: told.Frame, base: ?*anyopaque) MapError!void {
     const ptr = fieldPtr(base, field.offset);
 
     switch (field.kind) {
@@ -622,7 +622,7 @@ fn unpackField(field: *const FieldDesc, frame: tld.Frame, base: ?*anyopaque) Map
     }
 }
 
-fn packStruct(enc: *tld.Encoder, desc: *const StructDesc, value: ?*const anyopaque) MapError!void {
+fn packStruct(enc: *told.Encoder, desc: *const StructDesc, value: ?*const anyopaque) MapError!void {
     const fields = desc.fields orelse return error.InvalidArgument;
 
     if (desc.named != 0) {
@@ -646,7 +646,7 @@ fn packStruct(enc: *tld.Encoder, desc: *const StructDesc, value: ?*const anyopaq
     try enc.end(mark);
 }
 
-fn unpackStruct(desc: *const StructDesc, frame: tld.Frame, out: ?*anyopaque) MapError!void {
+fn unpackStruct(desc: *const StructDesc, frame: told.Frame, out: ?*anyopaque) MapError!void {
     const fields = desc.fields orelse return error.InvalidArgument;
 
     if (desc.named != 0) {
@@ -674,7 +674,7 @@ fn unpackStruct(desc: *const StructDesc, frame: tld.Frame, out: ?*anyopaque) Map
 }
 
 /// Append `value`, described by `desc`, to the encoder.
-export fn qnnt_tld_pack_struct(
+export fn told_pack_struct(
     handle: ?*Encoder,
     desc: ?*const StructDesc,
     value: ?*const anyopaque,
@@ -687,7 +687,7 @@ export fn qnnt_tld_pack_struct(
 }
 
 /// Fill `out`, described by `desc`, from a decoded frame.
-export fn qnnt_tld_unpack_struct(
+export fn told_unpack_struct(
     frame: ?*const Frame,
     desc: ?*const StructDesc,
     out: ?*anyopaque,
@@ -700,7 +700,7 @@ export fn qnnt_tld_unpack_struct(
 }
 
 /// Decode `bytes` and fill `out` in one call, for the common case.
-export fn qnnt_tld_unpack_struct_bytes(
+export fn told_unpack_struct_bytes(
     bytes: ?[*]const u8,
     len: usize,
     desc: ?*const StructDesc,
@@ -709,7 +709,7 @@ export fn qnnt_tld_unpack_struct_bytes(
     const raw = bytes orelse return .invalid_argument;
     const d = desc orelse return .invalid_argument;
     if (out == null) return .invalid_argument;
-    const decoded = tld.decode(raw[0..len]) catch |err| return statusFor(err);
+    const decoded = told.decode(raw[0..len]) catch |err| return statusFor(err);
     unpackStruct(d, decoded, out) catch |err| return statusFor(err);
     return .ok;
 }

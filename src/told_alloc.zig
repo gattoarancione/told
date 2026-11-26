@@ -1,23 +1,14 @@
-//! The allocator the TLD C ABI uses, chosen by build mode.
+//! The allocator the TOLD C ABI uses, chosen by build mode.
 //!
-//! A deliberate copy of `alloc.zig`, not a shared import. The codec is meant to carve out
-//! into a project of its own, and the file set that goes with it — `tld.zig`, `tld_c.zig`,
-//! `tld_abi.zig` and the two headers — imports nothing from qnnt but this. Owning the
-//! choice here is what makes that set self-contained.
+//! This is the only allocator in the C ABI, and no allocation crosses the line: the only
+//! thing that allocates is the encoder's output buffer, and `told_encoder_create` and
+//! `told_encoder_destroy` are both on this side of it; `told_encoder_bytes` hands out a
+//! borrowed pointer the caller never frees. So a program that also links another Zig
+//! library with its own allocator (qnnt's `libqnnt_c.a` does) never frees against the
+//! wrong one.
 //!
-//! The copy is safe because no allocation crosses between the two. The only thing here
-//! that allocates is the encoder's output buffer, and `qnnt_tld_encoder_create` and
-//! `qnnt_tld_encoder_destroy` are both on this side of the line; `qnnt_tld_encoder_bytes`
-//! hands out a borrowed pointer the caller never frees. So a program holding both
-//! allocators — `libqnnt_c.a` does, since it pulls the codec's exports in — never frees
-//! against the wrong one.
-//!
-//! What it costs is drift: change the policy in `alloc.zig` and this file does not follow.
-//! Keep them in step deliberately, or let them diverge deliberately, but check both.
-//!
-//! The rationale for the choice itself is the one `alloc.zig` gives: small, short-lived
-//! blocks dominate, and `page_allocator` rounds each to a page, measured at ~1.1 us per
-//! alloc/free pair against 2-3 ns here. Debug and ReleaseSafe get `DebugAllocator`, which
+//! The choice itself: small, short-lived blocks dominate, and `page_allocator` rounds each
+//! to a page, measured at ~1.1 us per alloc/free pair against 2-3 ns here. Debug and ReleaseSafe get `DebugAllocator`, which
 //! is thread-safe in a multi-threaded build and tracks allocations. Faster modes get
 //! `smp_allocator`, a thread-safe process singleton.
 //!

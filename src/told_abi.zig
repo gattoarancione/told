@@ -1,13 +1,14 @@
-//! The C ABI shape of a decoded TLD frame, declared ONCE.
+//! The C ABI shape of a decoded TOLD frame, declared ONCE.
 //!
-//! This file exports nothing. That is the whole point: `tld_c.zig` and `qnnt_c.zig` are the
-//! roots of two SEPARATE libraries, `qnnt_tld` and `qnnt_c`, and a program may link both.
-//! If either imported the other to share this type, every `export fn` in the imported file
-//! would be compiled into both archives and the link would fail on duplicate symbols. A
-//! module with no exports can be imported by both safely.
+//! This file exports nothing. That is the whole point: `told_c.zig` is the root of `libtold`,
+//! and a downstream C library that hands TOLD frames to its own callers (qnnt's `qnnt_c` is
+//! the first) needs the same layout. If it imported `told_c.zig` to share this type, every
+//! `export fn` there would be compiled into both archives and a program linking both would
+//! fail on duplicate symbols. A module with no exports -- the `told_abi` module in
+//! build.zig -- can be imported by both safely.
 //!
-//! Before this, the layout existed three times -- here in Zig for the TLD library, again in
-//! Zig for the node library's frame callback, and in C in `include/qnnt_tld.h` -- held
+//! Before this, the layout existed three times -- here in Zig for the TOLD library, again in
+//! Zig for the node library's frame callback, and in C in `include/told.h` -- held
 //! together by a comment reading "must match". Nothing checked it. A field reordered in one
 //! place would have been a callback reading a length as a pointer, at runtime, silently.
 //!
@@ -17,7 +18,7 @@
 
 const std = @import("std");
 
-/// Mirrors `qnnt_tld_frame` in include/qnnt_tld.h. Flat rather than opaque because the
+/// Mirrors `told_frame` in include/told.h. Flat rather than opaque because the
 /// zero-copy decoder already reduces a frame to a type, a mod and two borrowed spans.
 pub const Frame = extern struct {
     type: u8,
@@ -32,9 +33,9 @@ pub const Frame = extern struct {
 
 // Expressed against pointer width rather than as literals, so the same assertions hold on
 // a 32-bit target: there the whole struct is 20 bytes, not 40, and hard-coding either
-// would have made this file wrong on half the machines qnnt cross-compiles for.
+// would have made this file wrong on half the machines this cross-compiles for.
 //
-// The mirror of these lives in include/qnnt_tld.h as static assertions on the C struct.
+// The mirror of these lives in include/told.h as static assertions on the C struct.
 // Change one and the other must be changed with it -- which is now enforced by both
 // failing to compile rather than by anybody remembering.
 comptime {

@@ -1,0 +1,17 @@
+.{
+    .name = .told,
+    .version = "0.1.0",
+    .fingerprint = 0x505e520943d9cd4,
+    // Written against the 0.16 std (std.Io.Reader, unmanaged ArrayList), same as qnnt,
+    // which it was carved out of.
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "include",
+        "LICENSE",
+        "README.md",
+    },
+}
