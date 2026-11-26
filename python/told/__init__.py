@@ -110,6 +110,10 @@ class Encoder:
         elif isinstance(value, bool):
             _check(lib.told_write_bool(handle, value), "write bool")
         elif isinstance(value, int):
+            # ctypes does no overflow checking, so 2**64 would go out as 0 without a word.
+            # The format's widest integer is 64 bits: signed below zero, unsigned above.
+            if not -(1 << 63) <= value <= (1 << 64) - 1:
+                raise OverflowError(f"{value} does not fit in 64 bits, the widest TOLD integer")
             if value < 0:
                 _check(lib.told_write_i64(handle, value), "write int")
             else:
@@ -161,8 +165,18 @@ def dumps(value: Any) -> bytes:
         return enc.bytes()
 
 
-def _decode_frame(lib: C.CDLL, frame: Frame, buffer: bytes) -> Any:
+# How deeply loads() lets containers nest. Decoding recurses once per level, so without a
+# limit a small hostile frame -- a few thousand nested one-byte arrays -- would end in
+# RecursionError instead of ToldError. Well inside Python's default recursion limit.
+MAX_DEPTH = 256
+
+_DEPTH_EXCEEDED = 7  # TOLD_DEPTH_EXCEEDED
+
+
+def _decode_frame(lib: C.CDLL, frame: Frame, buffer: bytes, depth_left: int) -> Any:
     kind = frame.type
+    if kind in (ARRAY, OBJECT) and depth_left <= 0:
+        raise ToldError(_DEPTH_EXCEEDED, "depth exceeded", "containers nest too deeply")
 
     if kind == NULL:
         return None
@@ -197,7 +211,7 @@ def _decode_frame(lib: C.CDLL, frame: Frame, buffer: bytes) -> Any:
             _check(lib.told_array_next(C.byref(it), C.byref(child), C.byref(have)), "array next")
             if not have.value:
                 return items
-            items.append(_decode_frame(lib, child, buffer))
+            items.append(_decode_frame(lib, child, buffer, depth_left - 1))
     if kind == OBJECT:
         it = Iter()
         _check(lib.told_object_iter(C.byref(frame), C.byref(it)), "object iter")
@@ -213,7 +227,7 @@ def _decode_frame(lib: C.CDLL, frame: Frame, buffer: bytes) -> Any:
             if not have.value:
                 return result
             key = bytes(bytearray(kp[0 : kl.value])).decode("utf-8")
-            result[key] = _decode_frame(lib, value, buffer)
+            result[key] = _decode_frame(lib, value, buffer, depth_left - 1)
     if kind == EXTENDED:
         # Section 8 leaves extension framing to each extension, so there is nothing
         # generic to return but the code.
@@ -222,12 +236,15 @@ def _decode_frame(lib: C.CDLL, frame: Frame, buffer: bytes) -> Any:
     raise ToldError(3, "reserved type", f"type nibble 0x{kind:X}")
 
 
-def loads(data: bytes) -> Any:
-    """Decode one TOLD frame into Python natives. Ignores trailing bytes."""
+def loads(data: bytes, max_depth: int = MAX_DEPTH) -> Any:
+    """Decode one TOLD frame into Python natives. Ignores trailing bytes.
+
+    Containers may nest `max_depth` deep; deeper raises ToldError("depth exceeded").
+    """
     lib = _lib_ref()
     frame = Frame()
     _check(lib.told_decode(data, len(data), C.byref(frame)), "decode")
-    return _decode_frame(lib, frame, data)
+    return _decode_frame(lib, frame, data, max_depth)
 
 
 def frame_size(data: bytes) -> int | None:
@@ -366,9 +383,9 @@ def pack(value: Any) -> bytes:
     return dumps(value)
 
 
-def unpack(target: type, data: bytes) -> Any:
+def unpack(target: type, data: bytes, max_depth: int = MAX_DEPTH) -> Any:
     """Decode one frame and rebuild it as `target`, following that type's annotations."""
-    return _convert(loads(data), target)
+    return _convert(loads(data, max_depth), target)
 
 
 def _convert(value: Any, target: Any) -> Any:
@@ -441,6 +458,9 @@ def _convert(value: Any, target: Any) -> Any:
             return bytes(value)
         if target is str and isinstance(value, bytes):
             return value.decode("utf-8")
+        # bool is a subclass of int, so without this True would pass as the integer 1.
+        if target in (int, float) and isinstance(value, bool):
+            raise ToldError(-1, "type mismatch", f"expected {target.__name__}, frame has bool")
         if target is float and isinstance(value, int):
             return float(value)
         if target in (int, float, str, bool, bytes) and isinstance(value, target):

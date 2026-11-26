@@ -65,6 +65,20 @@ class RoundTrip(unittest.TestCase):
     def test_loads_ignores_trailing_bytes(self):
         self.assertEqual(told.loads(told.dumps(1) + b"junk"), 1)
 
+    def test_64_bit_bounds_round_trip(self):
+        self.assertEqual(told.loads(told.dumps(-(2**63))), -(2**63))
+        self.assertEqual(told.loads(told.dumps(2**63 - 1)), 2**63 - 1)
+
+    def test_values_above_i64_decode_as_signed(self):
+        # The format has no unsigned family: the bits survive, the reader reinterprets.
+        self.assertEqual(told.dumps(2**64 - 1), b"\x68" + b"\xff" * 8)
+        self.assertEqual(told.loads(told.dumps(2**64 - 1)), -1)
+
+    def test_integers_beyond_64_bits_are_refused_not_wrapped(self):
+        for value in (2**64, -(2**63) - 1, 10**30):
+            with self.subTest(value=value), self.assertRaises(OverflowError):
+                told.dumps(value)
+
 
 class Framing(unittest.TestCase):
     def test_frame_size_from_the_header_alone(self):
@@ -103,6 +117,30 @@ class Rejections(unittest.TestCase):
         with self.assertRaises(told.ToldError) as caught:
             told.loads(bytes([0xD0]))
         self.assertEqual(caught.exception.status_name, "reserved type")
+
+    def test_deep_nesting_is_a_told_error_not_a_recursion_error(self):
+        deep = b"\xa0"
+        for _ in range(3000):
+            n = len(deep)
+            deep = (bytes([0xA0 | n]) if n <= 7
+                    else bytes([0xA9]) + n.to_bytes(2, "big") if n > 255
+                    else bytes([0xA8, n])) + deep
+        with self.assertRaises(told.ToldError) as caught:
+            told.loads(deep)
+        self.assertEqual(caught.exception.status_name, "depth exceeded")
+
+    def test_max_depth_counts_containers(self):
+        nested = told.dumps([[[1]]])
+        self.assertEqual(told.loads(nested, max_depth=3), [[[1]]])
+        with self.assertRaises(told.ToldError):
+            told.loads(nested, max_depth=2)
+        self.assertEqual(told.loads(told.dumps(1), max_depth=0), 1)  # scalars need none
+
+    def test_default_depth_allows_reasonable_nesting(self):
+        value = 1
+        for _ in range(told.MAX_DEPTH):
+            value = [value]
+        self.assertEqual(told.loads(told.dumps(value)), value)
 
     def test_truncated(self):
         with self.assertRaises(told.ToldError) as caught:
@@ -187,6 +225,15 @@ class StructMapping(unittest.TestCase):
     def test_wrong_type_is_refused(self):
         with self.assertRaises(told.ToldError):
             told.unpack(Point, told.dumps([1.0, 2.0]))
+
+    def test_bool_is_not_an_int_or_a_float(self):
+        for target in (int, float):
+            with self.subTest(target=target), self.assertRaises(told.ToldError):
+                told.unpack(target, told.dumps(True))
+        with self.assertRaises(told.ToldError):
+            told.unpack(Reading, told.dumps({"channel": True, "value": 1.0}))
+        self.assertIs(told.unpack(bool, told.dumps(True)), True)
+        self.assertEqual(told.unpack(float, told.dumps(2)), 2.0)  # int still widens
 
 
 @unittest.skipUnless(GOLDEN.exists(), "no source tree here (running from an installed wheel)")

@@ -681,7 +681,7 @@ pub fn stringify(frame: Frame, allocator: Allocator, out: *std.ArrayList(u8), ma
         .tinyuint => try out.print(allocator, "{d}", .{frame.mod}),
         .int8, .int16, .int32, .int64 => try out.print(allocator, "{d}", .{try frame.asInt()}),
         .float32, .float64 => try out.print(allocator, "{d}", .{try frame.asFloat()}),
-        .string => try out.print(allocator, "\"{s}\"", .{try frame.asString()}),
+        .string => try writeJsonString(allocator, out, try frame.asString()),
 
         .array => {
             if (max_depth == 0) return error.DepthExceeded;
@@ -704,7 +704,8 @@ pub fn stringify(frame: Frame, allocator: Allocator, out: *std.ArrayList(u8), ma
             while (try it.next()) |pair| {
                 if (!first) try out.appendSlice(allocator, ",");
                 first = false;
-                try out.print(allocator, "\"{s}\":", .{pair.key});
+                try writeJsonString(allocator, out, pair.key);
+                try out.append(allocator, ':');
                 try stringify(pair.value, allocator, out, max_depth - 1);
             }
             try out.append(allocator, '}');
@@ -721,6 +722,23 @@ pub fn stringify(frame: Frame, allocator: Allocator, out: *std.ArrayList(u8), ma
         .extended => try out.print(allocator, "<ext 0x{x:0>2}>", .{frame.ext_code orelse 0}),
         .reserved_d, .reserved_e => return error.ReservedType,
     }
+}
+
+/// A string as a JSON literal. Escaped so that a quote, backslash or newline in the data
+/// cannot end the string early or break the log line it is printed on. The input is
+/// already valid UTF-8, so bytes from 0x80 up pass through as they are.
+fn writeJsonString(allocator: Allocator, out: *std.ArrayList(u8), s: []const u8) Allocator.Error!void {
+    try out.append(allocator, '"');
+    for (s) |c| switch (c) {
+        '"' => try out.appendSlice(allocator, "\\\""),
+        '\\' => try out.appendSlice(allocator, "\\\\"),
+        '\n' => try out.appendSlice(allocator, "\\n"),
+        '\r' => try out.appendSlice(allocator, "\\r"),
+        '\t' => try out.appendSlice(allocator, "\\t"),
+        0x00...0x08, 0x0B, 0x0C, 0x0E...0x1F => try out.print(allocator, "\\u{x:0>4}", .{c}),
+        else => try out.append(allocator, c),
+    };
+    try out.append(allocator, '"');
 }
 
 test {

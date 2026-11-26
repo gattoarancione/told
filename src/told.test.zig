@@ -130,6 +130,7 @@ test "L = 0 decodes to zero" {
 }
 
 test "sized int round-trip across magnitudes and signs" {
+    // zig fmt: off
     const cases = [_]i64{
         0,                       1,                    -1,  127,  -128, 128,   -129,
         255,                     -256,                 300, -300, 32767, -32768,
@@ -137,6 +138,7 @@ test "sized int round-trip across magnitudes and signs" {
         2147483647,              -2147483648,          4294967296,
         std.math.maxInt(i64),    std.math.minInt(i64),
     };
+    // zig fmt: on
 
     for (cases) |v| {
         var out: std.ArrayList(u8) = .empty;
@@ -589,12 +591,14 @@ test "validate walks the whole tree" {
 
     // Bad UTF-8 buried inside a nested array is found, where plain decode would not
     // look at it.
+    // zig fmt: off
     const nested_bad = [_]u8{
         told.headerByte(.object, 7),
         0x92, 'o',  'k',
         told.headerByte(.array, 3),
         0x92, 0xFF, 0xFE,
     };
+    // zig fmt: on
     _ = try told.decode(&nested_bad); // outer frame alone is well-formed
     try testing.expectError(error.InvalidUtf8, told.validate(&nested_bad, 8));
 }
@@ -642,6 +646,25 @@ test "stringify renders a frame for humans" {
 
     try testing.expectEqualStrings(
         \\{"seq":7,"live":true,"name":"node-0","miss":null,"raw":<buffer 2B 0102>}
+    , text.items);
+}
+
+test "stringify escapes strings and keys" {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    var enc = told.Encoder.init(allocator, &out);
+
+    const obj = enc.beginObject();
+    try enc.writeKey("a\"b");
+    try enc.writeString("line\n\"quoted\" \\ tab\t bell\x07 é");
+    try enc.end(obj);
+
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(allocator);
+    try told.stringify(try told.decode(out.items), allocator, &text, 8);
+
+    try testing.expectEqualStrings(
+        \\{"a\"b":"line\n\"quoted\" \\ tab\t bell\u0007 é"}
     , text.items);
 }
 
@@ -837,7 +860,6 @@ test "out of range and type mismatch are reported, not truncated" {
     try told.packTo(testing.allocator, &buf, @as([]const u8, "not a number"));
     try testing.expectError(error.TypeMismatch, told.unpackFrom(u32, buf.items, null));
 }
-
 
 // -- cross-language golden frame --------------------------------------------------------
 //
