@@ -69,6 +69,41 @@ pub fn build(b: *Build) void {
     });
     b.step("fuzz", "Run the mutational fuzzer on decode and validate").dependOn(&b.addRunArtifact(fuzz_tests).step);
 
+    // The C-level fuzz target for told_read_frame, driven by tests/fuzz_main.c because no
+    // libFuzzer runtime ships with Zig. It links a ReleaseSafe libtold of its own, so the
+    // library's safety checks stay on whatever -Doptimize says, and the C side keeps the
+    // UBSan checks Zig enables for C in safe modes.
+    const fuzz_lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "told-fuzz",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/told_c.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    const fuzz_c_mod = b.createModule(.{ .target = target, .optimize = .ReleaseSafe, .link_libc = true });
+    fuzz_c_mod.addCSourceFiles(.{ .files = &.{ "tests/fuzz_read_frame.c", "tests/fuzz_main.c" }, .flags = c_flags });
+    fuzz_c_mod.addIncludePath(b.path("include"));
+    fuzz_c_mod.linkLibrary(fuzz_lib);
+    const fuzz_c = b.addExecutable(.{ .name = "fuzz-read-frame", .root_module = fuzz_c_mod });
+
+    // Every `zig build test` reads 10K streams from a fixed seed.
+    const fuzz_c_quick = b.addRunArtifact(fuzz_c);
+    fuzz_c_quick.addArgs(&.{ "--iterations", "10000", "--seed", "0" });
+    test_step.dependOn(&fuzz_c_quick.step);
+
+    // `zig build fuzz-c` runs as many as asked; `zig build fuzz-c -- FILE` replays one.
+    // Crash inputs are saved in the repository root, where it runs.
+    const fuzz_c_run = b.addRunArtifact(fuzz_c);
+    fuzz_c_run.setCwd(b.path("."));
+    if (b.args) |files| {
+        fuzz_c_run.addArgs(files);
+    } else {
+        fuzz_c_run.addArgs(&.{ "--iterations", b.fmt("{d}", .{fuzz_iterations}), "--seed", b.fmt("{d}", .{fuzz_seed}) });
+    }
+    b.step("fuzz-c", "Fuzz told_read_frame through the C ABI").dependOn(&fuzz_c_run.step);
+
     // The C and C++ programs are the only thing that checks the hand-written headers
     // against the exports -- a mismatch there is invisible from Zig -- so every one of them
     // runs as part of `test`. The told-map pair also decode src/testdata/interop.tld, which

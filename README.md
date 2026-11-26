@@ -189,6 +189,21 @@ for a longer run:
 zig build fuzz -Dfuzz-iterations=10000000 -Dfuzz-seed=7   # ReleaseSafe, ~100K inputs/s
 ```
 
+`told_read_frame` has a C-level fuzz target of its own, `tests/fuzz_read_frame.c`. Each
+input sets the reader's conditions (buffer capacity, bytes per read, a read that fails)
+and supplies the stream. The callback must never be asked to write outside the buffer,
+no byte past a frame may be read, every frame and every error must agree with
+`told_decode` reading the same bytes from memory, and a failed read must surface as one:
+
+```sh
+zig build fuzz-c -Dfuzz-iterations=100000000             # ~2.5M inputs/s
+zig build fuzz-c -- fuzz-crash-1-25.bin                   # replay a saved failure
+```
+
+It is a standard `LLVMFuzzerTestOneInput`, so a toolchain with libFuzzer can drive it
+directly (`clang -fsanitize=fuzzer,address -Iinclude tests/fuzz_read_frame.c -ltold`);
+`tests/fuzz_main.c` is the driver for those without, Zig's and Apple's clang included.
+
 A failure prints the seed, iteration and input bytes. Coverage-guided fuzzing through
 `zig build test --fuzz` is wired up too, but Zig 0.16.0's test runner does not compile
 with `-ffuzz`, so until that is fixed upstream the mutational fuzzer above is the one to run.
