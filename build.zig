@@ -38,6 +38,7 @@ pub fn build(b: *Build) void {
     });
 
     var told_static: *Build.Step.Compile = undefined;
+    var told_dynamic: *Build.Step.Compile = undefined;
     for ([_]std.builtin.LinkMode{ .static, .dynamic }) |linkage| {
         const lib = b.addLibrary(.{
             .linkage = linkage,
@@ -47,7 +48,7 @@ pub fn build(b: *Build) void {
         lib.installHeader(b.path("include/told.h"), "told.h");
         lib.installHeader(b.path("include/told.hpp"), "told.hpp");
         b.installArtifact(lib);
-        if (linkage == .static) told_static = lib;
+        if (linkage == .static) told_static = lib else told_dynamic = lib;
     }
 
     const test_step = b.step("test", "Run the Zig tests and the C/C++ checks");
@@ -86,4 +87,34 @@ pub fn build(b: *Build) void {
         b.step(ex.name, ex.desc).dependOn(&run.step);
         test_step.dependOn(&run.step);
     }
+
+    // The Python package, checked against the shared library just built. The path is
+    // passed as an argument so the script never has to guess which build it is testing.
+    // It decodes the golden frame too, so it belongs in `test` with the C and C++ checks.
+    const python_test = b.addSystemCommand(&.{ "python3", "python/test_told.py" });
+    python_test.addFileArg(told_dynamic.getEmittedBin());
+    b.step("python-test", "Run the Python package against the built library").dependOn(&python_test.step);
+    test_step.dependOn(&python_test.step);
+
+    // Bundle the shared library into the package, then build a wheel from it. The copy
+    // lands in the source tree because that is where setuptools looks for package data;
+    // `python/told/_lib/` is generated, not authored.
+    const bundle = b.addUpdateSourceFiles();
+    bundle.addCopyFileToSource(told_dynamic.getEmittedBin(), b.fmt("python/told/_lib/{s}", .{
+        told_dynamic.out_filename,
+    }));
+
+    const wheel = b.addSystemCommand(&.{
+        "python3",     "-m",            "pip",      "wheel", "--no-deps", "--quiet",
+        "--wheel-dir", "zig-out/wheel", "./python",
+    });
+    wheel.step.dependOn(&bundle.step);
+    b.step("wheel", "Bundle the shared library and build a Python wheel").dependOn(&wheel.step);
+
+    // Installing the wheel into a throwaway venv and running the test from it is the only
+    // check that the packaging works: it proves the library is inside the wheel and found
+    // without TOLD_LIBRARY or a source checkout to fall back on.
+    const wheel_test = b.addSystemCommand(&.{ "python3", "python/verify_wheel.py" });
+    wheel_test.step.dependOn(&wheel.step);
+    b.step("wheel-test", "Install the wheel in a venv and run the test from it").dependOn(&wheel_test.step);
 }

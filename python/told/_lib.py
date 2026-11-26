@@ -1,4 +1,4 @@
-"""Locating and declaring the shared library. Nothing public lives here."""
+"""Locating and declaring the shared library. Nothing public lives here but ToldError."""
 
 from __future__ import annotations
 
@@ -9,11 +9,11 @@ from ctypes.util import find_library
 from pathlib import Path
 
 _SUFFIX = {"darwin": ".dylib", "win32": ".dll"}.get(sys.platform, ".so")
-_NAME = ("qnnt_c" if sys.platform != "win32" else "qnnt_c")
+_NAME = "told"
 
 
-class Error(Exception):
-    """A qnnt call failed. Carries the numeric status alongside the message."""
+class ToldError(Exception):
+    """A TOLD encode or decode failed. Carries the numeric status alongside the message."""
 
     def __init__(self, status: int, name: str, context: str = "") -> None:
         super().__init__(f"{context}: {name}" if context else name)
@@ -25,7 +25,7 @@ def _candidates() -> list[Path]:
     """Where to look, most explicit first."""
     found: list[Path] = []
 
-    override = os.environ.get("QNNT_LIBRARY")
+    override = os.environ.get("TOLD_LIBRARY")
     if override:
         found.append(Path(override))
 
@@ -33,10 +33,10 @@ def _candidates() -> list[Path]:
 
     # A checkout's own build comes first, ahead of the bundled copy. The bundled file is a
     # build artifact that `zig build wheel` drops in, and it goes stale silently: once it
-    # existed, it shadowed the freshly compiled library and calls failed with dlsym errors
-    # for symbols added since. An installed wheel has no zig-out above it, so it still
-    # loads its bundled copy -- only a checkout is affected, and there the live build is
-    # what you meant.
+    # exists, it would shadow the freshly compiled library and calls would fail with dlsym
+    # errors for symbols added since. An installed wheel has no zig-out above it, so it
+    # still loads its bundled copy -- only a checkout is affected, and there the live build
+    # is what you meant.
     found.append(here.parents[1] / "zig-out" / "lib" / f"lib{_NAME}{_SUFFIX}")
 
     # Bundled inside the package, which is how a wheel ships it.
@@ -57,51 +57,16 @@ def load() -> C.CDLL:
                 return C.CDLL(str(path))
             except OSError:
                 continue
-    raise Error(
+    raise ToldError(
         -1,
         "library not found",
-        "looked in " + ", ".join(str(p) for p in tried) + " (set QNNT_LIBRARY to override)",
+        "looked in " + ", ".join(str(p) for p in tried) + " (set TOLD_LIBRARY to override)",
     )
 
 
-class EventRecord(C.Structure):
-    """One buffered connection event, as qnnt_poll_events writes it."""
-
-    _fields_ = [
-        ("event", C.c_int),
-        ("topic", C.POINTER(C.c_char)),
-        ("topic_len", C.c_size_t),
-        ("peer", C.POINTER(C.c_char)),
-        ("peer_len", C.c_size_t),
-        ("subscribers", C.c_size_t),
-        ("at_us", C.c_uint64),
-    ]
-
-
-class Reply(C.Structure):
-    """Mirrors qnnt_reply. Pointers stay valid until the next poll_replies."""
-
-    _fields_ = [
-        ("id", C.c_uint64),
-        ("status", C.c_int),
-        ("procedure", C.POINTER(C.c_char)),
-        ("procedure_len", C.c_size_t),
-        ("data", C.POINTER(C.c_ubyte)),
-        ("data_len", C.c_size_t),
-    ]
-
-
-class Message(C.Structure):
-    _fields_ = [
-        ("topic", C.POINTER(C.c_char)),
-        ("topic_len", C.c_size_t),
-        ("data", C.POINTER(C.c_uint8)),
-        ("data_len", C.c_size_t),
-        ("received_us", C.c_uint64),
-    ]
-
-
 class Frame(C.Structure):
+    """Mirrors told_frame in told.h, and src/told_abi.zig."""
+
     _fields_ = [
         ("type", C.c_uint8),
         ("mod", C.c_uint8),
@@ -114,6 +79,8 @@ class Frame(C.Structure):
 
 
 class Iter(C.Structure):
+    """Mirrors told_iter in told.h."""
+
     _fields_ = [("rest", C.POINTER(C.c_uint8)), ("rest_len", C.c_size_t)]
 
 
@@ -123,160 +90,68 @@ def declare(lib: C.CDLL) -> C.CDLL:
     Without this, a Python int passed where the ABI wants uint64 is truncated to 32 bits
     on some platforms, silently.
     """
-    sig = lib.qnnt_status_name
-    sig.argtypes, sig.restype = [C.c_int], C.c_char_p
+    lib.told_version.argtypes, lib.told_version.restype = [], C.c_char_p
+    lib.told_status_name.argtypes, lib.told_status_name.restype = [C.c_int], C.c_char_p
 
-    lib.qnnt_set_registry_port.argtypes = [C.c_uint16]
-    lib.qnnt_set_registry_port.restype = C.c_int
-    lib.qnnt_set_realtime_priority.argtypes = [C.c_uint8]
-    lib.qnnt_set_realtime_priority.restype = C.c_int
-    lib.qnnt_realtime_priority.argtypes = []
-    lib.qnnt_realtime_priority.restype = C.c_uint8
-    lib.qnnt_subscriber_count.argtypes = [C.c_char_p, C.c_size_t]
-    lib.qnnt_subscriber_count.restype = C.c_size_t
-    lib.qnnt_wait_for_subscriber.argtypes = [C.c_char_p, C.c_size_t, C.c_uint64]
-    lib.qnnt_wait_for_subscriber.restype = C.c_bool
-    lib.qnnt_wait_for_subscribers.argtypes = [C.c_char_p, C.c_size_t, C.c_size_t, C.c_uint64]
-    lib.qnnt_wait_for_subscribers.restype = C.c_bool
-    lib.qnnt_poll_events.argtypes = [C.POINTER(EventRecord), C.c_size_t, C.POINTER(C.c_size_t)]
-    lib.qnnt_poll_events.restype = C.c_int
-    lib.qnnt_events_dropped.argtypes = []
-    lib.qnnt_events_dropped.restype = C.c_uint64
-    lib.qnnt_set_stale_timeout.argtypes = [C.c_uint64]
-    lib.qnnt_set_stale_timeout.restype = None
-    lib.qnnt_stale_timeout.argtypes = []
-    lib.qnnt_stale_timeout.restype = C.c_uint64
-    lib.qnnt_set_lock_memory.argtypes = [C.c_uint8]
-    lib.qnnt_set_lock_memory.restype = C.c_int
-    lib.qnnt_lock_memory.argtypes = []
-    lib.qnnt_lock_memory.restype = C.c_uint8
-    lib.qnnt_set_handler_stack_bytes.argtypes = [C.c_size_t]
-    lib.qnnt_set_handler_stack_bytes.restype = C.c_int
-    lib.qnnt_handler_stack_bytes.argtypes = []
-    lib.qnnt_handler_stack_bytes.restype = C.c_size_t
-    lib.qnnt_set_local_sockets.argtypes = [C.c_uint8]
-    lib.qnnt_set_local_sockets.restype = C.c_int
-    lib.qnnt_local_sockets.argtypes = []
-    lib.qnnt_local_sockets.restype = C.c_uint8
-    lib.qnnt_set_socket_dir.argtypes = [C.c_char_p]
-    lib.qnnt_set_socket_dir.restype = C.c_int
-    lib.qnnt_registry_port.argtypes, lib.qnnt_registry_port.restype = [], C.c_uint16
-
-    for name in ("qnnt_set_advertise_address", "qnnt_set_bind_address", "qnnt_set_cluster_key"):
-        fn = getattr(lib, name)
-        fn.argtypes, fn.restype = [C.c_char_p], C.c_int
-    lib.qnnt_set_federation_port.argtypes = [C.c_uint16]
-    lib.qnnt_set_federation_port.restype = C.c_int
-    lib.qnnt_add_peer.argtypes = [C.c_char_p, C.c_uint16]
-    lib.qnnt_add_peer.restype = C.c_int
-
-    lib.qnnt_configure_from_environment.argtypes = []
-    lib.qnnt_configure_from_environment.restype = None
-
-    lib.qnnt_init.argtypes, lib.qnnt_init.restype = [], C.c_int
-    lib.qnnt_deinit.argtypes, lib.qnnt_deinit.restype = [], None
-    lib.qnnt_install_signal_handlers.argtypes = []
-    lib.qnnt_stop_requested.argtypes, lib.qnnt_stop_requested.restype = [], C.c_bool
-    lib.qnnt_now_micros.argtypes, lib.qnnt_now_micros.restype = [], C.c_int64
-    lib.qnnt_sleep_ms.argtypes = [C.c_uint64]
-
-    lib.qnnt_publisher_start.argtypes = [C.c_char_p, C.c_size_t, C.c_void_p, C.c_uint64, C.c_void_p]
-    lib.qnnt_publisher_start.restype = C.c_int
-    lib.qnnt_publish.argtypes = [C.c_char_p, C.c_size_t, C.c_void_p, C.c_size_t]
-    lib.qnnt_publish.restype = C.c_int
-    lib.qnnt_add_responder.argtypes = [C.c_char_p, C.c_size_t, C.c_void_p, C.c_void_p]
-    lib.qnnt_add_responder.restype = C.c_int
-    lib.qnnt_remove_responder.argtypes = [C.c_char_p, C.c_size_t]
-    lib.qnnt_remove_responder.restype = C.c_int
-    lib.qnnt_request.argtypes = [C.c_char_p, C.c_size_t, C.c_void_p, C.c_size_t,
-                                 C.c_uint64, C.c_void_p, C.c_size_t, C.POINTER(C.c_size_t)]
-    lib.qnnt_request.restype = C.c_int
-    lib.qnnt_request_begin.argtypes = [C.c_char_p, C.c_size_t, C.c_void_p, C.c_size_t, C.c_uint64]
-    lib.qnnt_request_begin.restype = C.c_uint64
-    lib.qnnt_poll_replies.argtypes = [C.POINTER(Reply), C.c_size_t, C.c_int32, C.POINTER(C.c_size_t)]
-    lib.qnnt_poll_replies.restype = C.c_int
-    lib.qnnt_requests_in_flight.argtypes, lib.qnnt_requests_in_flight.restype = [], C.c_size_t
-    lib.qnnt_rpc_status_name.argtypes, lib.qnnt_rpc_status_name.restype = [C.c_int], C.c_char_p
-    lib.qnnt_remove_publisher.argtypes = [C.c_char_p, C.c_size_t]
-    lib.qnnt_remove_publisher.restype = C.c_int
-    lib.qnnt_remove_subscriber.argtypes = [C.c_char_p, C.c_size_t]
-    lib.qnnt_remove_subscriber.restype = C.c_int
-
-    lib.qnnt_queue_reserve.argtypes, lib.qnnt_queue_reserve.restype = [C.c_size_t], C.c_int
-    lib.qnnt_queue_dropped.argtypes, lib.qnnt_queue_dropped.restype = [], C.c_uint64
-    lib.qnnt_subscribe_queue.argtypes = [C.c_char_p, C.c_size_t, C.c_int]
-    lib.qnnt_subscribe_queue.restype = C.c_int
-    lib.qnnt_subscribe_pattern_queue.argtypes = [C.c_char_p, C.c_size_t, C.c_int, C.c_uint64]
-    lib.qnnt_subscribe_pattern_queue.restype = C.c_int
-    lib.qnnt_topic_matches.argtypes = [C.c_char_p, C.c_size_t, C.c_char_p, C.c_size_t]
-    lib.qnnt_topic_matches.restype = C.c_bool
-    lib.qnnt_poll.argtypes = [C.POINTER(Message), C.c_size_t, C.c_int32, C.POINTER(C.c_size_t)]
-    lib.qnnt_poll.restype = C.c_int
-
-    # --- TLD -------------------------------------------------------------------
-    lib.qnnt_tld_version.argtypes, lib.qnnt_tld_version.restype = [], C.c_char_p
-    lib.qnnt_tld_status_name.argtypes, lib.qnnt_tld_status_name.restype = [C.c_int], C.c_char_p
-
-    lib.qnnt_tld_encoder_create.argtypes, lib.qnnt_tld_encoder_create.restype = [], C.c_void_p
-    lib.qnnt_tld_encoder_destroy.argtypes = [C.c_void_p]
-    lib.qnnt_tld_encoder_reset.argtypes = [C.c_void_p]
-    lib.qnnt_tld_encoder_bytes.argtypes = [C.c_void_p, C.POINTER(C.c_size_t)]
-    lib.qnnt_tld_encoder_bytes.restype = C.POINTER(C.c_uint8)
+    lib.told_encoder_create.argtypes, lib.told_encoder_create.restype = [], C.c_void_p
+    lib.told_encoder_destroy.argtypes = [C.c_void_p]
+    lib.told_encoder_reset.argtypes = [C.c_void_p]
+    lib.told_encoder_bytes.argtypes = [C.c_void_p, C.POINTER(C.c_size_t)]
+    lib.told_encoder_bytes.restype = C.POINTER(C.c_uint8)
 
     for name, extra in (
-        ("qnnt_tld_write_null", []),
-        ("qnnt_tld_write_bool", [C.c_bool]),
-        ("qnnt_tld_write_u64", [C.c_uint64]),
-        ("qnnt_tld_write_i64", [C.c_int64]),
-        ("qnnt_tld_write_f64", [C.c_double]),
+        ("told_write_null", []),
+        ("told_write_bool", [C.c_bool]),
+        ("told_write_u64", [C.c_uint64]),
+        ("told_write_i64", [C.c_int64]),
+        ("told_write_f64", [C.c_double]),
     ):
         fn = getattr(lib, name)
         fn.argtypes, fn.restype = [C.c_void_p, *extra], C.c_int
 
-    for name in ("qnnt_tld_write_string", "qnnt_tld_write_buffer"):
+    for name in ("told_write_string", "told_write_buffer"):
         fn = getattr(lib, name)
         fn.argtypes, fn.restype = [C.c_void_p, C.c_char_p, C.c_size_t], C.c_int
 
-    for name in ("qnnt_tld_begin_array", "qnnt_tld_begin_object"):
+    for name in ("told_begin_array", "told_begin_object"):
         fn = getattr(lib, name)
         fn.argtypes, fn.restype = [C.c_void_p, C.POINTER(C.c_size_t)], C.c_int
 
-    for name in ("qnnt_tld_end_array", "qnnt_tld_end_object"):
+    for name in ("told_end_array", "told_end_object"):
         fn = getattr(lib, name)
         fn.argtypes, fn.restype = [C.c_void_p, C.c_size_t], C.c_int
 
-    lib.qnnt_tld_decode.argtypes = [C.c_char_p, C.c_size_t, C.POINTER(Frame)]
-    lib.qnnt_tld_decode.restype = C.c_int
-    lib.qnnt_tld_frame_size.argtypes = [C.c_char_p, C.c_size_t, C.POINTER(C.c_size_t)]
-    lib.qnnt_tld_frame_size.restype = C.c_int
-    lib.qnnt_tld_validate.argtypes = [C.c_char_p, C.c_size_t, C.c_size_t]
-    lib.qnnt_tld_validate.restype = C.c_int
+    lib.told_decode.argtypes = [C.c_char_p, C.c_size_t, C.POINTER(Frame)]
+    lib.told_decode.restype = C.c_int
+    lib.told_frame_size.argtypes = [C.c_char_p, C.c_size_t, C.POINTER(C.c_size_t)]
+    lib.told_frame_size.restype = C.c_int
+    lib.told_validate.argtypes = [C.c_char_p, C.c_size_t, C.c_size_t]
+    lib.told_validate.restype = C.c_int
 
-    for name in ("qnnt_tld_as_bool",):
-        fn = getattr(lib, name)
-        fn.argtypes, fn.restype = [C.POINTER(Frame), C.POINTER(C.c_bool)], C.c_int
-    lib.qnnt_tld_as_i64.argtypes = [C.POINTER(Frame), C.POINTER(C.c_int64)]
-    lib.qnnt_tld_as_i64.restype = C.c_int
-    lib.qnnt_tld_as_u64.argtypes = [C.POINTER(Frame), C.POINTER(C.c_uint64)]
-    lib.qnnt_tld_as_u64.restype = C.c_int
-    lib.qnnt_tld_as_f64.argtypes = [C.POINTER(Frame), C.POINTER(C.c_double)]
-    lib.qnnt_tld_as_f64.restype = C.c_int
+    lib.told_as_bool.argtypes = [C.POINTER(Frame), C.POINTER(C.c_bool)]
+    lib.told_as_bool.restype = C.c_int
+    lib.told_as_i64.argtypes = [C.POINTER(Frame), C.POINTER(C.c_int64)]
+    lib.told_as_i64.restype = C.c_int
+    lib.told_as_u64.argtypes = [C.POINTER(Frame), C.POINTER(C.c_uint64)]
+    lib.told_as_u64.restype = C.c_int
+    lib.told_as_f64.argtypes = [C.POINTER(Frame), C.POINTER(C.c_double)]
+    lib.told_as_f64.restype = C.c_int
 
-    for name in ("qnnt_tld_as_string", "qnnt_tld_as_buffer"):
+    for name in ("told_as_string", "told_as_buffer"):
         fn = getattr(lib, name)
         fn.argtypes = [C.POINTER(Frame), C.POINTER(C.POINTER(C.c_uint8)), C.POINTER(C.c_size_t)]
         fn.restype = C.c_int
 
-    for name in ("qnnt_tld_array_iter", "qnnt_tld_object_iter"):
+    for name in ("told_array_iter", "told_object_iter"):
         fn = getattr(lib, name)
         fn.argtypes, fn.restype = [C.POINTER(Frame), C.POINTER(Iter)], C.c_int
 
-    lib.qnnt_tld_array_next.argtypes = [C.POINTER(Iter), C.POINTER(Frame), C.POINTER(C.c_bool)]
-    lib.qnnt_tld_array_next.restype = C.c_int
-    lib.qnnt_tld_object_next.argtypes = [
+    lib.told_array_next.argtypes = [C.POINTER(Iter), C.POINTER(Frame), C.POINTER(C.c_bool)]
+    lib.told_array_next.restype = C.c_int
+    lib.told_object_next.argtypes = [
         C.POINTER(Iter), C.POINTER(C.POINTER(C.c_uint8)), C.POINTER(C.c_size_t),
         C.POINTER(Frame), C.POINTER(C.c_bool),
     ]
-    lib.qnnt_tld_object_next.restype = C.c_int
+    lib.told_object_next.restype = C.c_int
 
     return lib

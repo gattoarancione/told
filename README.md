@@ -2,8 +2,8 @@
 
 **TOLD** — *Typo Lenght Data*. Yes, the typo is the name: a joke on Type-Length-Data.
 
-A compact binary serialization format in the TLV family, implemented in Zig, with a C ABI
-and a header-only C++ wrapper on top. It began life inside qnnt as its frame codec and is
+A compact binary serialization format in the TLV family, implemented in Zig, with a C ABI,
+a header-only C++ wrapper and a Python package on top. It began life inside qnnt as its frame codec and is
 carved out here as a library of its own.
 
 - **Zero-copy, allocation-free decoding.** `decode` returns a `Frame` borrowing your bytes;
@@ -13,7 +13,7 @@ carved out here as a library of its own.
 - **Stream friendly.** At most 9 bytes of prefix tell a reader exactly how long a frame
   is (`frameSize`, `readFrame`), so frames can span read boundaries without guessing.
 - **Struct mapping** in every language: `@typeInfo` in Zig, `TOLD_DEFINE_MAP` in C++,
-  descriptor tables in C. All of them are pinned to one golden frame,
+  descriptor tables in C, dataclasses in Python. All of them are pinned to one golden frame,
   `src/testdata/interop.tld`.
 
 ## The wire format, in one screen
@@ -44,7 +44,7 @@ Requires **Zig 0.16.0**.
 
 ```sh
 zig build            # libtold.a, libtold.{so,dylib}, told.h, told.hpp into zig-out/
-zig build test       # Zig tests + the C and C++ programs, which check the headers
+zig build test       # Zig tests, the C/C++ programs that check the headers, Python
 ```
 
 ### Zig
@@ -93,17 +93,46 @@ A downstream Zig library that exposes TOLD frames through its own C ABI should i
 `told_abi` module for the `told_frame` layout rather than `told_c.zig`, so the `told_*`
 symbols are not compiled into both archives.
 
+### Python
+
+`python/told` is a ctypes binding over `libtold`, so the wire format has one
+implementation. It needs Python 3.10+.
+
+```python
+from dataclasses import dataclass
+
+import told
+
+data = told.dumps({"seq": 4242, "raw": b"\x0a\xff"})  # bytes -> BUFFER, str -> STRING
+told.validate(data)
+value = told.loads(data)
+
+@dataclass
+class Reading:
+    channel: int
+    value: float
+    valid: bool = True
+
+back = told.unpack(Reading, told.pack(Reading(1, 3.5)))
+```
+
+`zig build wheel` bundles the library into a platform wheel in `zig-out/wheel/`, and
+`zig build wheel-test` installs it in a clean venv and runs the tests from there. From a
+checkout the package finds `zig-out/lib` on its own; `TOLD_LIBRARY` overrides the path.
+
 ## Layout
 
 ```
-src/told.zig        the codec: Frame, decode, validate, Encoder, readFrame, pack/unpack
-src/told.test.zig   its tests
-src/told_c.zig      the C ABI (root of libtold)
-src/told_abi.zig    the C frame layout, no exports
-src/told_alloc.zig  the C ABI's allocator, chosen by build mode
-src/testdata/       the golden cross-language frame
-include/            told.h, told.hpp
-examples/           C and C++ programs, all run by `zig build test`
+src/told.zig         the codec: Frame, decode, validate, Encoder, readFrame, pack/unpack
+src/told.test.zig    its tests
+src/told_c.zig       the C ABI (root of libtold)
+src/told_abi.zig     the C frame layout, no exports
+src/told_alloc.zig   the C ABI's allocator, chosen by build mode
+src/testdata/        the golden cross-language frame
+include/             told.h, told.hpp
+examples/            C and C++ programs, all run by `zig build test`
+python/told/         the Python package
+python/test_told.py  its tests, also run by `zig build test`
 ```
 
 ## License

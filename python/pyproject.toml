@@ -3,15 +3,15 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "qnnt"
+name = "told"
 version = "0.1.0"
-description = "Python interface to the qnnt pub/sub node and its TLD wire format"
+description = "Python interface to TOLD, the Typo Lenght Data binary serialization format"
 requires-python = ">=3.10"
 
 [tool.setuptools]
-packages = ["qnnt"]
+packages = ["told"]
 
-# The shared library is expected inside the package as qnnt/_lib/. A wheel-building step
-# copies it there; a checkout is found via ../zig-out/lib, and QNNT_LIBRARY overrides both.
+# The shared library is expected inside the package as told/_lib/. `zig build wheel`
+# copies it there; a checkout is found via ../zig-out/lib, and TOLD_LIBRARY overrides both.
 [tool.setuptools.package-data]
-qnnt = ["_lib/*"]
+told = ["_lib/*"]

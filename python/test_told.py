@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
-"""Exercises the Python package end to end. Run via `zig build python-demo`.
+"""Exercises the Python package end to end. Run via `zig build python-test`.
 
 Takes an optional path to the shared library, which is how the build step points it at a
 freshly compiled one.
 """
 
+import math
 import os
 import sys
-import time
+from dataclasses import dataclass
+from enum import IntEnum
 from pathlib import Path
+from typing import Optional
 
 if len(sys.argv) > 1:
-    os.environ["QNNT_LIBRARY"] = sys.argv[1]
+    os.environ["TOLD_LIBRARY"] = sys.argv[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import qnnt
-from qnnt import tld
+import told
 
 failures = 0
 
@@ -29,9 +31,9 @@ def check(name, ok, detail=""):
         print(f"  FAIL  {name}  {detail}")
 
 
-print(f"qnnt python demo (TLD wire format v{qnnt.version()})")
+print(f"told python test (wire format v{told.version()})")
 
-print("\nTLD round-trips through Python natives:")
+print("\nround-trips through Python natives:")
 cases = [
     None, True, False, 0, 15, 16, 300, -1, -300, 2**40, -(2**40),
     1.5, -0.0, "hello", "héllo wörld", "", b"", b"\x00\xff\x0a",
@@ -39,156 +41,52 @@ cases = [
     {"seq": 4242, "live": True, "name": "node", "raw": b"\x0a\xff\x00", "tags": [1, 2.5, None]},
 ]
 for value in cases:
-    encoded = tld.dumps(value)
-    tld.validate(encoded)
-    decoded = tld.loads(encoded)
+    encoded = told.dumps(value)
+    told.validate(encoded)
+    decoded = told.loads(encoded)
     same = decoded == value
     if isinstance(value, float) and value == 0.0:
         # -0.0 == 0.0, so compare the sign bit explicitly: the encoder must not collapse it.
-        import math
         same = math.copysign(1, decoded) == math.copysign(1, value)
-    if isinstance(value, tuple):
-        same = decoded == list(value)
     check(f"{value!r:.40}", same, f"{len(encoded)}B" + ("" if same else f" -> {decoded!r}"))
 
 # A small frame carries its length in the header nibble, so one byte is already enough.
-tiny = tld.dumps({"a": 1})
-check("frame_size from the header alone", tld.frame_size(tiny[:1]) == len(tiny), f"{len(tiny)}B")
+tiny = told.dumps({"a": 1})
+check("frame_size from the header alone", told.frame_size(tiny[:1]) == len(tiny), f"{len(tiny)}B")
 
 # Only an extended length field can be incomplete: this one needs 1 header + 2 length bytes.
-big = tld.dumps(b"x" * 300)
+big = told.dumps(b"x" * 300)
 check("frame_size is None while the length field is short",
-      tld.frame_size(big[:1]) is None and tld.frame_size(big[:2]) is None)
+      told.frame_size(big[:1]) is None and told.frame_size(big[:2]) is None)
 check("frame_size once the length field is whole",
-      tld.frame_size(big[:3]) == len(big), f"{len(big)}B")
+      told.frame_size(big[:3]) == len(big), f"{len(big)}B")
 
 print("\nrejections:")
 try:
-    tld.dumps({1: "int key"})
+    told.dumps({1: "int key"})
     check("int object key rejected", False)
 except TypeError as err:
     check("int object key rejected", True, str(err))
 try:
-    tld.loads(bytes([0xD0]))
+    told.loads(bytes([0xD0]))
     check("reserved nibble rejected", False)
-except tld.TldError as err:
+except told.ToldError as err:
     check("reserved nibble rejected", True, err.status_name)
 try:
-    tld.dumps(object())
+    told.dumps(object())
     check("unsupported type rejected", False)
 except TypeError:
     check("unsupported type rejected", True)
 
-print("\nnode: publish and drain")
-# Its own registry port, overridable: this demo is run twice by the build -- once from the
-# source tree and once from an installed wheel -- and those two must not contend for one
-# registry, since the build runs its steps in parallel.
-DEMO_PORT = int(os.environ.get("QNNT_REGISTRY_PORT", "22302"))
-
-# Small handler stacks, so the registry connections below are served on them.
-with qnnt.Node(registry_port=DEMO_PORT, queue_capacity=8192, handler_stack_bytes=200_000) as node:
-    stack = node._lib.qnnt_handler_stack_bytes()
-    check("handler stack rounded up to a page", stack >= 200_000 and stack % os.sysconf("SC_PAGE_SIZE") == 0,
-          f"got {stack}")
-    check("handler stack fixed once running", node._lib.qnnt_set_handler_stack_bytes(0) != 0)
-    node.publisher("py/text")
-    node.publisher("py/frames")
-    node.subscribe("py/text")
-    node.subscribe("py/frames", frames=True)
-    time.sleep(0.4)  # let discovery settle
-
-    # Publish in rounds, draining as we go, until both topics have delivered enough.
-    #
-    # A burst sent straight after subscribing is not reliable, and not because of a bug:
-    # `publish` reaches subscribers that are connected AT THAT MOMENT, and there is no
-    # retention. A subscription whose first resolve loses the race against the publisher's
-    # registration backs off a full probe interval before retrying, so a fixed sleep
-    # before publishing is a bet on timing. Sending until the data arrives is what a real
-    # producer of live telemetry does anyway.
-    WANT = 300
-    text, frames, polls, sent = [], [], 0, 0
-    deadline = time.time() + 15.0
-    while (len(text) < WANT or len(frames) < WANT) and time.time() < deadline:
-        for _ in range(50):
-            node.publish("py/text", f"line-{sent}\n".encode())
-            node.publish_object("py/frames", {"seq": sent, "raw": b"\x0a\xff"})
-            sent += 1
-        for msg in node.poll(timeout=0.1):
-            (text if msg.topic == "py/text" else frames).append(msg)
-        polls += 1
-
-    text_bodies = [m.text() for m in text]
-    frame_values = [m.value() for m in frames]
-
-    check("text messages", len(text_bodies) >= WANT, f"{len(text_bodies)}/{WANT} of {sent} sent")
-    check("frame messages", len(frame_values) >= WANT, f"{len(frame_values)}/{WANT} of {sent} sent")
-    check("text content intact", text_bodies[0].startswith("line-"), repr(text_bodies[:1]))
-    check("frames decode to dicts",
-          set(frame_values[0]) == {"seq", "raw"}, repr(frame_values[:1]))
-
-    # Contiguous from wherever delivery began: a gap in the middle would mean the framing
-    # lost sync, which is the property worth asserting. Messages published before a
-    # subscriber connected are simply not there to receive.
-    seqs = [v["seq"] for v in frame_values]
-    check("no gaps in what arrived", seqs == list(range(seqs[0], seqs[0] + len(seqs))),
-          f"first={seqs[0]} last={seqs[-1]} count={len(seqs)}")
-    check("payload with 0x0a survived framing", all(v["raw"] == b"\x0a\xff" for v in frame_values))
-    check("nothing dropped", node.dropped == 0, f"dropped={node.dropped}")
-    check("batching amortises the crossing", len(text) + len(frames) > polls,
-          f"{(len(text)+len(frames))/max(polls,1):.0f} messages per poll")
-
-
-# ---------------------------------------------------------------- glob subscriptions
-#
-# One queue fed by every topic matching a pattern, including topics that did not exist when
-# the subscription started -- which is the arrangement plain `subscribe` cannot express.
-#
-# Over TCP, with local sockets off: the path every remote subscriber takes, kept exercised
-# from Python now that same-host traffic defaults to Unix sockets.
-
-with qnnt.Node(registry_port=DEMO_PORT, queue_capacity=8192, local_sockets=False) as node:
-    node.publisher("py/bus/alpha")
-    node.publisher("py/busy-elsewhere")  # a near miss: 'py/bus/*' must not take it
-    node.subscribe_pattern("py/bus/*", rescan=0.2)
-
-    # Created AFTER the pattern is already running, so arriving at all proves the rescan
-    # found it rather than the initial listing having caught it.
-    node.publisher("py/bus/beta")
-
-    got = {}
-    deadline = time.time() + 15.0
-    while len(got) < 2 and time.time() < deadline:
-        for topic in ("py/bus/alpha", "py/bus/beta", "py/busy-elsewhere"):
-            node.publish(topic, b"tick\n")
-        for msg in node.poll(timeout=0.1):
-            got.setdefault(msg.topic, 0)
-            got[msg.topic] += 1
-
-    check("glob joins a topic present at the start", got.get("py/bus/alpha", 0) > 0, str(got))
-    check("glob joins a topic that appears later", got.get("py/bus/beta", 0) > 0, str(got))
-    check("glob leaves a near miss alone", "py/busy-elsewhere" not in got, str(got))
-    check("each message says which topic it came from", set(got) <= {"py/bus/alpha", "py/bus/beta"})
-
-    # The same matcher, asked directly -- for a program that routes on the topic, or filters
-    # its own traffic back out.
-    check("the matcher is available to the caller",
-          node.topic_matches("py/bus/*", "py/bus/alpha")
-          and node.topic_matches("py/bus/*", "py/bus/deep/er")  # '*' crosses '/'
-          and node.topic_matches("py/?us/a", "py/bus/a")
-          and not node.topic_matches("py/bus/*", "py/busy-elsewhere")
-          and not node.topic_matches("py/bus/*", "other/bus/a"))
-
 
 # ---------------------------------------------------------------- struct mapping
 #
-# The counterpart of the TLD_DEFINE_MAP macros in C++ and of tld.pack/unpack in Zig. The
+# The counterpart of the TOLD_DEFINE_MAP macros in C++ and of told.pack/unpack in Zig. The
 # golden frame at the end is the one that matters: it was produced by the Zig mapping, and
 # this side has to both read it and reproduce it exactly, or a Python producer and a Zig
 # consumer have quietly diverged.
 
-from dataclasses import dataclass
-from enum import IntEnum
-from typing import Optional
+print("\nstruct mapping:")
 
 
 class Mode(IntEnum):
@@ -225,161 +123,40 @@ CANONICAL = Sample(99, 'sensor-a', Mode.faulted,
                    [Reading(1, 3.5, True), Reading(2, -0.25, False)],
                    bytes([0x00, 0xFF, 0x0A]), None, Point(1.5, -2.5))
 
-packed = tld.pack(CANONICAL)
-check('a dataclass round trips', tld.unpack(Sample, packed) == CANONICAL,
+packed = told.pack(CANONICAL)
+check('a dataclass round trips', told.unpack(Sample, packed) == CANONICAL,
       f"{len(packed)} bytes")
 
 # A field the frame omits falls back to the dataclass default; an unknown key is ignored.
-lenient = tld.dumps({'channel': 4, 'value': 1.5, 'added_later': 'ignored'})
+lenient = told.dumps({'channel': 4, 'value': 1.5, 'added_later': 'ignored'})
 check('unknown keys ignored, defaults applied',
-      tld.unpack(Reading, lenient) == Reading(4, 1.5, True))
+      told.unpack(Reading, lenient) == Reading(4, 1.5, True))
 
 try:
-    tld.unpack(Reading, tld.dumps({'channel': 4}))
+    told.unpack(Reading, told.dumps({'channel': 4}))
     check('a missing field without a default is refused', False)
-except tld.TldError as err:
-    # str(err), not err.args[1]: Error collapses status, message and context into one
-    # message, so args has a single element.
+except told.ToldError as err:
     check('a missing field without a default is refused', True, str(err))
 
 # Enums travel as their value, and a name is accepted too, as in Zig.
 check('enum by value and by name',
-      tld.unpack(Mode, tld.dumps(2)) is Mode.faulted
-      and tld.unpack(Mode, tld.dumps('running')) is Mode.running)
+      told.unpack(Mode, told.dumps(2)) is Mode.faulted
+      and told.unpack(Mode, told.dumps('running')) is Mode.running)
 
-golden_path = Path(__file__).resolve().parent.parent / 'lib' / 'testdata' / 'interop.tld'
+golden_path = Path(__file__).resolve().parent.parent / 'src' / 'testdata' / 'interop.tld'
 if golden_path.exists():
     golden = golden_path.read_bytes()
     check('the golden frame from Zig decodes here',
-          tld.unpack(Sample, golden) == CANONICAL)
+          told.unpack(Sample, golden) == CANONICAL)
     check('and Python re-encodes it byte for byte', packed == golden,
           f"{len(packed)} vs {len(golden)} bytes")
 else:
-    # Absent when this demo runs from an installed wheel, which carries the package and the
+    # Absent when this runs from an installed wheel, which carries the package and the
     # shared library but not the repository's test data. Not a failure: the golden frame is
     # a source-tree check, and the build runs this same script both ways.
     print('  skip  golden frame check (no source tree here)')
 
 print()
-
-
-# --- per-topic teardown ------------------------------------------------------------
-#
-# Exercises qnnt_remove_publisher / qnnt_remove_subscriber through ctypes. Both join the
-# topic's worker threads, so the interesting failure is a hang here, not a wrong answer.
-
-with qnnt.Node(registry_port=DEMO_PORT, queue_capacity=1024) as node:
-    node.publisher("py/going")
-    node.subscribe("py/going")
-    time.sleep(0.4)
-
-    check('remove_subscriber reports it removed something', node.remove_subscriber("py/going"))
-    check('and says so only once', not node.remove_subscriber("py/going"))
-
-    check('remove_publisher reports it removed something', node.remove_publisher("py/going"))
-    check('and says so only once', not node.remove_publisher("py/going"))
-
-    check('the publisher has no subscribers left', node.subscriber_count("py/going") == 0)
-
-    # And the node still works afterwards: removal is not a disguised shutdown.
-    node.publisher("py/after")
-    node.subscribe("py/after")
-    time.sleep(0.4)
-    got, sent, deadline = 0, 0, time.time() + 10.0
-    while got == 0 and time.time() < deadline:
-        for _ in range(20):
-            node.publish("py/after", f"still-here-{sent}\n".encode())
-            sent += 1
-        time.sleep(0.05)
-        got += len(node.poll(timeout=0.2))
-    check('the node still publishes after a removal', got > 0, f"{got} message(s)")
-
-print()
-
-
-# --- request/reply -----------------------------------------------------------------
-#
-# Exercises the whole C ABI for procedures: serving one from Python (a library thread
-# calling in), calling it blocking, and calling it non-blocking with tickets.
-
-with qnnt.Node(registry_port=DEMO_PORT, queue_capacity=1024) as node:
-    def upper(_procedure, request):
-        return request.upper()
-
-    def refuses(_procedure, _request):
-        return None
-
-    def explodes(_procedure, _request):
-        raise RuntimeError("deliberate: a raising handler is a refusal")
-
-    node.add_responder("py/rpc/upper", upper)
-    node.add_responder("py/rpc/no", refuses)
-    node.add_responder("py/rpc/boom", explodes)
-
-    # Registration is asynchronous, as it is for publishers.
-    deadline = time.time() + 5.0
-    while time.time() < deadline:
-        try:
-            node.request("py/rpc/upper", b"ping", timeout=1.0)
-            break
-        except qnnt.Error:
-            time.sleep(0.05)
-
-    check('a blocking request returns the reply', node.request("py/rpc/upper", b"abc") == b"ABC")
-    check('an empty request and reply survive the round trip',
-          node.request("py/rpc/upper", b"") == b"")
-
-    try:
-        node.request("py/rpc/no", b"x")
-        check('a refusal is reported as an error', False)
-    except qnnt.Error as err:
-        check('a refusal is reported as an error', err.status == int(qnnt.RpcStatus.refused),
-              str(err))
-
-    # A handler that raises must not take the responder down with it.
-    try:
-        node.request("py/rpc/boom", b"x")
-        check('a raising handler becomes a refusal', False)
-    except qnnt.Error as err:
-        check('a raising handler becomes a refusal',
-              err.status == int(qnnt.RpcStatus.refused))
-    check('and the responder still answers afterwards',
-          node.request("py/rpc/upper", b"still") == b"STILL")
-
-    try:
-        node.request("py/rpc/nobody", b"x", timeout=1.0)
-        check('an unknown procedure is an error', False)
-    except qnnt.Error as err:
-        check('an unknown procedure is an error',
-              err.status == int(qnnt.RpcStatus.no_procedure))
-
-    # Non-blocking: several tickets out at once, each matched to its own reply.
-    sent = {node.request_begin("py/rpc/upper", w): w.upper()
-            for w in (b"alpha", b"beta", b"gamma", b"delta")}
-    check('every request_begin returned a ticket', all(sent))
-
-    got, deadline = {}, time.time() + 10.0
-    while len(got) < len(sent) and time.time() < deadline:
-        for reply in node.poll_replies(timeout=0.2):
-            got[reply.id] = reply
-    check('every non-blocking reply came back', len(got) == len(sent), f"{len(got)}/{len(sent)}")
-    check('each reply matched its own ticket',
-          all(got[i].ok and got[i].data == want for i, want in sent.items()))
-    check('and each knows which procedure answered',
-          all(r.procedure == "py/rpc/upper" for r in got.values()))
-
-    check('remove_responder reports it removed something', node.remove_responder("py/rpc/upper"))
-    check('and says so only once', not node.remove_responder("py/rpc/upper"))
-
-print()
-
-
-try:
-    with qnnt.Node(registry_port=DEMO_PORT) as first, qnnt.Node(registry_port=DEMO_PORT) as second:
-        check('a second Node is refused', False)
-except RuntimeError as err:
-    check('a second Node is refused', True, str(err))
-
-print()
-print('FAILURES:', failures) if failures else print('all checks passed')
-sys.exit(1 if failures else 0)
+if failures:
+    sys.exit(f"{failures} check(s) failed")
+print("all Python checks passed")
