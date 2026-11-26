@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Claudio Russo (gattoarancione)
+
 """Install the freshly built wheel into a throwaway venv and run the test from it.
 
 This is the only check that the packaging is right. Running the test from the source tree

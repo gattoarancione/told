@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Claudio Russo (gattoarancione)
+
 """Locating and declaring the shared library. Nothing public lives here but ToldError."""
 
 from __future__ import annotations

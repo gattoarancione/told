@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 Claudio Russo (gattoarancione) */
+
 /* A unit-test harness small enough to read in one go, shared by the C and C++ tests.
  *
  * No framework on purpose: the library has no dependencies and cross-compiles to small

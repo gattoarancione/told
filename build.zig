@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Claudio Russo (gattoarancione)
+
 const std = @import("std");
 const Build = std.Build;
 

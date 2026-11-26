@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Claudio Russo (gattoarancione)
+
 //! TOLD (Typo Lenght Data) binary streaming protocol, v1.0.
 //!
 //! A frame is one header byte — high nibble TYPE, low nibble MOD — followed by an

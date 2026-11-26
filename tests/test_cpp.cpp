@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Claudio Russo (gattoarancione)
+
 // Unit tests for the C++ wrapper in told.hpp. The C tests already pin the bytes; these
 // check what the wrapper adds on top: exceptions carrying the status, RAII scopes, ranges,
 // the struct-mapping macros and adaptors, and readFrame over callables and istreams.

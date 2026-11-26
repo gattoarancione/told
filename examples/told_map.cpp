@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Claudio Russo (gattoarancione)
+
 // Struct mapping in C++: the TOLD_* macros, the msgpack-shaped call surface, and a check
 // that this side agrees byte-for-byte with the Zig and Python mappings.
 //

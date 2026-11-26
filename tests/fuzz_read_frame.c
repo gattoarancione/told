@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 Claudio Russo (gattoarancione) */
+
 /* Fuzz target for told_read_frame, the C entry point that reads untrusted streams.
  *
  * A standard libFuzzer entry point, so any libFuzzer- or AFL++-style fuzzer can drive it:

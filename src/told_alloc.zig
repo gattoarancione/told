@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Claudio Russo (gattoarancione)
+
 //! The allocator the TOLD C ABI uses, chosen by build mode.
 //!
 //! This is the only allocator in the C ABI, and no allocation crosses the line: the only

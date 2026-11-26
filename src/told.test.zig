@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Claudio Russo (gattoarancione)
+
 //! Tests for the TOLD v1.0 implementation. The byte-level cases are taken straight
 //! from the specification's worked examples, so a regression shows up as a mismatch
 //! against the spec rather than against a previous implementation's opinion.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Claudio Russo (gattoarancione)
+
 // The same round-trip as told_demo.c, through the C++ wrapper -- so the two can be read
 // side by side to see what the wrapper actually buys.
 #include <told.hpp>

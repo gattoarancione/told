@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Claudio Russo (gattoarancione)
+
 """Present only to force a platform-tagged wheel.
 
 Metadata lives in pyproject.toml. But the package ships a compiled shared library, so a

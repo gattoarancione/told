@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Claudio Russo (gattoarancione)
+
 //! C ABI for the TOLD codec. Every symbol here is `export ... callconv(.c)` and every
 //! signature is expressible in C: slices become (pointer, length) pairs, error unions
 //! become status codes, and the one stateful type — the encoder — becomes an opaque

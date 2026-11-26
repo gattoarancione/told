@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 Claudio Russo (gattoarancione) */
+
 /*
  * Struct mapping in C: a descriptor table instead of templates, and a check that this side
  * agrees with the Zig, C++ and Python mappings on the same golden frame.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Claudio Russo (gattoarancione)
+
 //! The C ABI shape of a decoded TOLD frame, declared ONCE.
 //!
 //! This file exports nothing. That is the whole point: `told_c.zig` is the root of `libtold`,

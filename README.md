@@ -210,4 +210,4 @@ with `-ffuzz`, so until that is fixed upstream the mutational fuzzer above is th
 
 ## License
 
-MIT — see `LICENSE`.
+MIT. Copyright (c) 2026 Claudio Russo (gattoarancione). See `LICENSE`.

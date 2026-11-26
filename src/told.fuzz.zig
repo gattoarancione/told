@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Claudio Russo (gattoarancione)
+
 //! Fuzz tests for `decode` and `validate`, the two functions that take untrusted bytes.
 //!
 //! Two drivers feed the same checks:

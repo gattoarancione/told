@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 Claudio Russo (gattoarancione) */
+
 /* A seeded mutational driver for tests/fuzz_read_frame.c, for toolchains without a
  * libFuzzer runtime. `zig build fuzz-c` runs it.
  *

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Claudio Russo (gattoarancione)
+
 """Unit tests for the Python package. Run via `zig build python-test`.
 
 Takes an optional path to the shared library as the first argument, which is how the build

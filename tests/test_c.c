@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 Claudio Russo (gattoarancione) */
+
 /* Unit tests for the C ABI in told.h. Byte vectors follow the ones src/told.test.zig pins
  * for the Zig side, so the two implementations of every claim are checked against the same
  * bytes. */
