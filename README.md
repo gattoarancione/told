@@ -44,7 +44,7 @@ Requires **Zig 0.16.0**.
 
 ```sh
 zig build            # libtold.a, libtold.{so,dylib}, told.h, told.hpp into zig-out/
-zig build test       # Zig tests, the C/C++ programs that check the headers, Python
+zig build test       # unit tests in all four languages, plus the C/C++ examples
 ```
 
 ### Zig
@@ -86,8 +86,8 @@ while (try it.next()) |kv| std.debug.print("{s}\n", .{kv.key});
 
 Link `libtold` and include `told.h` (C, `told_*` functions) or `told.hpp` (C++20,
 `namespace told`). See `examples/` — `told_demo.c` and `told_demo.cpp` walk the whole API,
-`told_map.c` and `told_map.cpp` show struct mapping, `told_stream.c` reads frames off a
-stream. Run any of them with `zig build told-demo-c` and so on.
+`told_map.c` and `told_map.cpp` show struct mapping. Run any of them with
+`zig build told-demo-c` and so on.
 
 To read frames off a socket, pipe or file, `told_read_frame` takes a read callback and a
 buffer you own. It reads exactly one frame, never a byte past it, and allocates nothing:
@@ -104,6 +104,15 @@ while ((s = told_read_frame(fd_read, &fd, buf, sizeof buf, &frame)) == TOLD_OK) 
     /* frame borrows buf until the next call */
 }
 /* TOLD_END_OF_STREAM is the clean end; anything else leaves the stream mid-frame */
+```
+
+In C++, `told::readFrame` takes a `std::istream` or any callable filling a
+`std::span<std::uint8_t>`, returns `std::nullopt` at the end, and throws `told::Error`
+otherwise. An exception thrown by the callable comes out of `readFrame` unchanged.
+
+```cpp
+std::vector<std::uint8_t> buf(64 * 1024);
+while (auto frame = told::readFrame(in, buf)) { /* *frame views buf */ }
 ```
 
 A downstream Zig library that exposes TOLD frames through its own C ABI should import the
@@ -131,6 +140,10 @@ class Reading:
     valid: bool = True
 
 back = told.unpack(Reading, told.pack(Reading(1, 3.5)))
+
+with open("frames.tld", "rb") as f:   # or sock.makefile("rb"), a pipe, a BytesIO
+    for value in told.Reader(f):      # one frame at a time, never reading past it
+        print(value)
 ```
 
 `zig build wheel` bundles the library into a platform wheel in `zig-out/wheel/`, and
@@ -147,10 +160,22 @@ src/told_abi.zig     the C frame layout, no exports
 src/told_alloc.zig   the C ABI's allocator, chosen by build mode
 src/testdata/        the golden cross-language frame
 include/             told.h, told.hpp
-examples/            C and C++ programs, all run by `zig build test`
+examples/            C and C++ demos, all run by `zig build test`
+tests/               C and C++ unit tests, and the small harness they share
 python/told/         the Python package
-python/test_told.py  its tests, also run by `zig build test`
+python/test_told.py  its unit tests
 ```
+
+## Testing
+
+`zig build test` runs every suite: the Zig tests in `src/told.test.zig`, the C and C++
+tests in `tests/`, the Python tests in `python/test_told.py`, and the examples. Each
+suite also has its own step: `zig build test-c`, `test-cpp`, `python-test`.
+
+The C and C++ tests use `tests/harness.h`, under a hundred lines, rather than a framework,
+so the tests need nothing the library does not and cross-compile with it. The byte
+vectors they check are the ones the Zig tests pin, and all four languages decode and
+re-encode `src/testdata/interop.tld`, so they cannot drift apart without a test failing.
 
 ## License
 

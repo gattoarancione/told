@@ -41,6 +41,8 @@ const Status = enum(c_int) {
     read_failed = 15,
     /// `told_read_frame` only: the frame does not fit the caller's buffer.
     frame_too_large = 16,
+    /// Struct mapping: the value does not fit the member's type.
+    out_of_range = 17,
 };
 
 fn statusFor(err: anyerror) Status {
@@ -55,6 +57,7 @@ fn statusFor(err: anyerror) Status {
         error.TypeMismatch => .type_mismatch,
         error.ExtensionFramingUnknown => .extension_framing_unknown,
         error.OutOfMemory => .out_of_memory,
+        error.OutOfRange => .out_of_range,
         else => .unexpected,
     };
 }
@@ -461,12 +464,16 @@ export fn told_begin_object(handle: ?*Encoder, mark: ?*usize) callconv(.c) Statu
 
 export fn told_end_array(handle: ?*Encoder, mark: usize) callconv(.c) Status {
     var enc = writer(handle) orelse return .invalid_argument;
+    // A mark past the end would underflow the length below: a trap in safe builds and
+    // undefined behaviour in fast ones, where C callers are owed a status.
+    if (mark > enc.out.items.len) return .invalid_argument;
     enc.end(.{ .start = mark, .type = .array }) catch |err| return statusFor(err);
     return .ok;
 }
 
 export fn told_end_object(handle: ?*Encoder, mark: usize) callconv(.c) Status {
     var enc = writer(handle) orelse return .invalid_argument;
+    if (mark > enc.out.items.len) return .invalid_argument;
     enc.end(.{ .start = mark, .type = .object }) catch |err| return statusFor(err);
     return .ok;
 }
@@ -492,6 +499,7 @@ export fn told_status_name(status: Status) callconv(.c) [*:0]const u8 {
         .end_of_stream => "end of stream",
         .read_failed => "read failed",
         .frame_too_large => "frame too large",
+        .out_of_range => "out of range",
     };
 }
 

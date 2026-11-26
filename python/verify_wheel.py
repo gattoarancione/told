@@ -53,13 +53,13 @@ try:
     env.pop("TOLD_LIBRARY", None)   # must be found inside the package
     env.pop("PYTHONPATH", None)
 
+    # unittest reports on stderr, so the two are merged to show its summary.
     result = subprocess.run([str(py), str(script)], cwd=tmp, env=env,
-                            capture_output=True, text=True)
-    tail = result.stdout.strip().splitlines()[-6:]
-    for line in tail:
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    lines = result.stdout.strip().splitlines()
+    for line in lines if result.returncode != 0 else lines[-4:]:
         print("  " + line)
     if result.returncode != 0:
-        print(result.stderr.strip()[-2000:])
         sys.exit("FAIL: the test failed when run from the installed wheel")
 
     print("OK: wheel installs and works with no checkout and no TOLD_LIBRARY")

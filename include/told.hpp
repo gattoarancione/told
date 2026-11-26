@@ -22,7 +22,11 @@
 #include "told.h"
 
 #include <array>
+#include <concepts>
+#include <cstddef>
 #include <cstdint>
+#include <exception>
+#include <istream>
 #include <map>
 #include <optional>
 #include <span>
@@ -272,6 +276,64 @@ inline ObjectRange Frame::object() const {
 /// input; `decode` only checks the outermost frame.
 inline void validate(Bytes bytes, std::size_t max_depth = 32) {
     check(told_validate(bytes.data(), bytes.size(), max_depth));
+}
+
+// ---------------------------------------------------------------- stream reading
+
+namespace detail {
+
+template <class Read>
+struct ReadContext {
+    Read& read;
+    std::exception_ptr error;
+};
+
+template <class Read>
+std::ptrdiff_t readTrampoline(void* ctx, std::uint8_t* dst, std::size_t len) noexcept {
+    auto* c = static_cast<ReadContext<Read>*>(ctx);
+    try {
+        return static_cast<std::ptrdiff_t>(c->read(std::span<std::uint8_t>{dst, len}));
+    } catch (...) {
+        // Unwinding through the C frames between here and readFrame is undefined, so the
+        // exception is carried across instead and rethrown on the far side.
+        c->error = std::current_exception();
+        return -1;
+    }
+}
+
+} // namespace detail
+
+/// Read exactly one frame off a stream into `buf`, never a byte past it. `read` is any
+/// callable taking a std::span<std::uint8_t> to fill and returning how much it filled --
+/// fewer is fine -- 0 at end of stream, or a negative value on error: told_read_fn's
+/// contract. An exception it throws comes out of readFrame unchanged.
+///
+/// Returns nullopt at a clean end of stream, between frames. Anything else throws Error
+/// and leaves the stream mid-frame, past resynchronising. The frame views `buf`.
+template <class Read>
+    requires std::invocable<Read&, std::span<std::uint8_t>>
+[[nodiscard]] std::optional<Frame> readFrame(Read&& read, std::span<std::uint8_t> buf) {
+    using R = std::remove_reference_t<Read>;
+    detail::ReadContext<R> ctx{read, nullptr};
+    told_frame frame{};
+    const Status status =
+        told_read_frame(&detail::readTrampoline<R>, &ctx, buf.data(), buf.size(), &frame);
+    if (ctx.error) std::rethrow_exception(ctx.error);
+    if (status == TOLD_END_OF_STREAM) return std::nullopt;
+    check(status);
+    return Frame{frame};
+}
+
+/// The same off a std::istream, which must be in binary mode. A badbit is a read error;
+/// a short read with eofbit is the end of stream, as it should be.
+[[nodiscard]] inline std::optional<Frame> readFrame(std::istream& in, std::span<std::uint8_t> buf) {
+    return readFrame(
+        [&in](std::span<std::uint8_t> dst) -> std::ptrdiff_t {
+            in.read(reinterpret_cast<char*>(dst.data()), static_cast<std::streamsize>(dst.size()));
+            if (in.bad()) return -1;
+            return static_cast<std::ptrdiff_t>(in.gcount());
+        },
+        buf);
 }
 
 /// Owns the encode buffer. Move-only, because two owners would double-free the handle.
@@ -755,6 +817,25 @@ void packValue(Encoder& enc, const T& value) {
     }
 }
 
+namespace detail {
+
+/// The frame's integer as `I`, or Error(TOLD_OUT_OF_RANGE) when it does not fit. A
+/// static_cast would wrap 300 to 44 in a uint8_t, which the Zig and C mappings refuse.
+template <class I>
+I checkedInt(const Frame& frame) {
+    if constexpr (std::is_signed_v<I>) {
+        const std::int64_t v = frame.asInt();
+        if (!std::in_range<I>(v)) throw Error{TOLD_OUT_OF_RANGE};
+        return static_cast<I>(v);
+    } else {
+        const std::uint64_t v = frame.asUint();
+        if (!std::in_range<I>(v)) throw Error{TOLD_OUT_OF_RANGE};
+        return static_cast<I>(v);
+    }
+}
+
+} // namespace detail
+
 /// Decode into an existing value.
 template <class T>
 void unpackValue(const Frame& frame, T& out) {
@@ -765,18 +846,9 @@ void unpackValue(const Frame& frame, T& out) {
     } else if constexpr (std::is_same_v<U, bool>) {
         out = frame.asBool();
     } else if constexpr (std::is_enum_v<U>) {
-        using Underlying = std::underlying_type_t<U>;
-        if constexpr (std::is_signed_v<Underlying>) {
-            out = static_cast<U>(static_cast<Underlying>(frame.asInt()));
-        } else {
-            out = static_cast<U>(static_cast<Underlying>(frame.asUint()));
-        }
+        out = static_cast<U>(detail::checkedInt<std::underlying_type_t<U>>(frame));
     } else if constexpr (std::is_integral_v<U>) {
-        if constexpr (std::is_signed_v<U>) {
-            out = static_cast<U>(frame.asInt());
-        } else {
-            out = static_cast<U>(frame.asUint());
-        }
+        out = detail::checkedInt<U>(frame);
     } else if constexpr (std::is_floating_point_v<U>) {
         out = static_cast<U>(frame.asFloat());
     } else if constexpr (std::is_same_v<U, std::string>) {

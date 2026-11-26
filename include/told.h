@@ -62,7 +62,9 @@ typedef enum {
     /* told_read_frame only: the read callback returned a negative value. */
     TOLD_READ_FAILED               = 15,
     /* told_read_frame only: the frame does not fit the buffer. */
-    TOLD_FRAME_TOO_LARGE           = 16
+    TOLD_FRAME_TOO_LARGE           = 16,
+    /* Struct mapping: the value does not fit the member's type. */
+    TOLD_OUT_OF_RANGE              = 17
 } told_status;
 
 /*

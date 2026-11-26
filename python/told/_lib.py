@@ -84,6 +84,10 @@ class Iter(C.Structure):
     _fields_ = [("rest", C.POINTER(C.c_uint8)), ("rest_len", C.c_size_t)]
 
 
+# told_read_fn: ptrdiff_t (*)(void *ctx, uint8_t *dst, size_t len)
+READ_FN = C.CFUNCTYPE(C.c_ssize_t, C.c_void_p, C.POINTER(C.c_uint8), C.c_size_t)
+
+
 def declare(lib: C.CDLL) -> C.CDLL:
     """Pin argtypes/restypes so ctypes converts rather than guessing.
 
@@ -127,6 +131,9 @@ def declare(lib: C.CDLL) -> C.CDLL:
     lib.told_frame_size.restype = C.c_int
     lib.told_validate.argtypes = [C.c_char_p, C.c_size_t, C.c_size_t]
     lib.told_validate.restype = C.c_int
+    lib.told_read_frame.argtypes = [READ_FN, C.c_void_p, C.POINTER(C.c_uint8), C.c_size_t,
+                                    C.POINTER(Frame)]
+    lib.told_read_frame.restype = C.c_int
 
     lib.told_as_bool.argtypes = [C.POINTER(Frame), C.POINTER(C.c_bool)]
     lib.told_as_bool.restype = C.c_int

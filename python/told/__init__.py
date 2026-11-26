@@ -36,8 +36,8 @@ from . import _lib
 from ._lib import Frame, Iter, ToldError
 
 __all__ = [
-    "Encoder", "ToldError", "dumps", "loads", "frame_size", "validate", "pack", "unpack",
-    "version",
+    "Encoder", "Reader", "ToldError", "dumps", "loads", "load", "read_frame", "frame_size",
+    "validate", "pack", "unpack", "version",
 ]
 
 # Type nibbles, mirroring told.h.
@@ -244,6 +244,99 @@ def frame_size(data: bytes) -> int | None:
 def validate(data: bytes, max_depth: int = 32) -> None:
     """Check a whole frame, nested contents included. Raises on anything malformed."""
     _check(_lib_ref().told_validate(data, len(data), max_depth), "validate")
+
+
+# ---------------------------------------------------------------- stream reading
+#
+# told_read_frame through a ctypes callback. Reading never goes past the frame, so whatever
+# else shares the stream is left where it was, and a socket's makefile("rb") works as well
+# as a file.
+
+_END_OF_STREAM = 14  # TOLD_END_OF_STREAM
+
+
+class Reader:
+    """Reads frames one at a time off a binary stream: a file, a pipe, a BytesIO, a
+    socket's makefile("rb") -- anything with readinto() or read().
+
+        with open("frames.tld", "rb") as f:
+            for value in told.Reader(f):
+                print(value)
+
+    `max_size` is the largest frame accepted, and the buffer allocated once up front; a
+    bigger frame raises ToldError("frame too large") as soon as its length field is read.
+    After any error but the clean end the stream is mid-frame and should be closed.
+    The stream must be blocking: a read that returns None raises BlockingIOError.
+    """
+
+    def __init__(self, stream: Any, max_size: int = 1 << 20) -> None:
+        if max_size <= 0:
+            raise ValueError("max_size must be positive")
+        self._lib = _lib_ref()
+        self._buf = (C.c_uint8 * max_size)()
+        self._error: BaseException | None = None
+
+        readinto = getattr(stream, "readinto", None)
+
+        def read(_ctx: Any, dst: Any, length: int) -> int:
+            # Nothing may propagate out of a ctypes callback: ctypes would print it and
+            # return 0, which told_read_frame would take for the end of the stream. The
+            # exception is carried across instead and raised by read_frame.
+            try:
+                address = C.cast(dst, C.c_void_p).value
+                view = memoryview((C.c_uint8 * length).from_address(address)).cast("B")
+                if readinto is not None:
+                    n = readinto(view)
+                else:
+                    chunk = stream.read(length)
+                    n = None if chunk is None else len(chunk)
+                    if n:
+                        view[:n] = chunk
+                if n is None:
+                    raise BlockingIOError("the stream has no data yet; Reader needs a blocking stream")
+                return n
+            except BaseException as err:  # noqa: BLE001 -- re-raised in read_frame
+                self._error = err
+                return -1
+
+        # Kept on the instance: the library calls it after this method has returned.
+        self._read = _lib.READ_FN(read)
+
+    def read_frame(self) -> bytes | None:
+        """The next frame's raw bytes, or None at a clean end of stream."""
+        frame = Frame()
+        status = self._lib.told_read_frame(self._read, None, self._buf, len(self._buf),
+                                           C.byref(frame))
+        if self._error is not None:
+            err, self._error = self._error, None
+            raise err
+        if status == _END_OF_STREAM:
+            return None
+        _check(status, "read_frame")
+        return bytes(memoryview(self._buf)[: frame.raw_len])
+
+    def load(self) -> Any:
+        """The next frame, decoded. Raises EOFError at a clean end of stream."""
+        raw = self.read_frame()
+        if raw is None:
+            raise EOFError("end of stream")
+        return loads(raw)
+
+    def __iter__(self):
+        """Decoded frames until the stream ends."""
+        while (raw := self.read_frame()) is not None:
+            yield loads(raw)
+
+
+def read_frame(stream: Any, max_size: int = 1 << 20) -> bytes | None:
+    """One frame's raw bytes off `stream`, or None at its end. Use a Reader in a loop: this
+    allocates its buffer on every call."""
+    return Reader(stream, max_size).read_frame()
+
+
+def load(stream: Any, max_size: int = 1 << 20) -> Any:
+    """One frame off `stream`, decoded -- the stream counterpart of loads()."""
+    return Reader(stream, max_size).load()
 
 
 # ---------------------------------------------------------------- struct mapping
