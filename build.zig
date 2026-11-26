@@ -66,6 +66,7 @@ pub fn build(b: *Build) void {
         .{ .name = "told-demo-cpp", .src = "examples/told_demo.cpp", .cpp = true, .desc = "Build and run the C++ example against the wrapper" },
         .{ .name = "told-map-c", .src = "examples/told_map.c", .cpp = false, .desc = "Build and run the C struct-mapping example" },
         .{ .name = "told-map-cpp", .src = "examples/told_map.cpp", .cpp = true, .desc = "Build and run the C++ struct-mapping example" },
+        .{ .name = "told-stream-c", .src = "examples/told_stream.c", .cpp = false, .desc = "Build and run the C stream-reader checks" },
     };
 
     for (examples) |ex| {

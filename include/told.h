@@ -56,7 +56,13 @@ typedef enum {
     /* told_frame_size only: too few bytes to tell yet -- read more. */
     TOLD_INCOMPLETE                = 11,
     TOLD_INVALID_ARGUMENT          = 12,
-    TOLD_UNEXPECTED                = 13
+    TOLD_UNEXPECTED                = 13,
+    /* told_read_frame only: the stream ended cleanly, between frames. */
+    TOLD_END_OF_STREAM             = 14,
+    /* told_read_frame only: the read callback returned a negative value. */
+    TOLD_READ_FAILED               = 15,
+    /* told_read_frame only: the frame does not fit the buffer. */
+    TOLD_FRAME_TOO_LARGE           = 16
 } told_status;
 
 /*
@@ -139,6 +145,30 @@ told_status told_frame_size(const uint8_t *bytes, size_t len, size_t *out);
 /* Walk the whole tree: nested frames, UTF-8 in strings, object shape. Use on untrusted
  * input; `max_depth` bounds recursion. */
 told_status told_validate(const uint8_t *bytes, size_t len, size_t max_depth);
+
+/* --- stream reading ---------------------------------------------------------- */
+
+/* Fill up to `len` bytes of `dst` from the stream behind `ctx`. Return the number of
+ * bytes read -- fewer than `len` is fine, the caller asks again -- 0 at end of stream,
+ * or a negative value on error. Retrying EINTR is the callback's business, and so is
+ * keeping errno: stash it in `ctx` if the caller needs it. */
+typedef ptrdiff_t (*told_read_fn)(void *ctx, uint8_t *dst, size_t len);
+
+/* Read exactly one frame into `buf` (at most `cap` bytes) and decode it into `out`, which
+ * then borrows `buf`. No byte past the frame is requested, so the next call starts on the
+ * next header and anything else sharing the stream is left where it was.
+ *
+ *   TOLD_END_OF_STREAM    the stream ended before a header byte: the clean end
+ *   TOLD_TRUNCATED        it ended mid-frame
+ *   TOLD_READ_FAILED      the callback returned a negative value
+ *   TOLD_FRAME_TOO_LARGE  the frame needs more than `cap` bytes
+ *
+ * After the last three the stream is mid-frame and cannot be resynchronised: close it.
+ * Validates only the outermost frame, as told_decode does -- see told_validate. EXTENDED
+ * frames are refused with TOLD_EXTENSION_FRAMING_UNKNOWN, since their length is the
+ * extension's business. */
+told_status told_read_frame(told_read_fn read, void *ctx, uint8_t *buf, size_t cap,
+                            told_frame *out);
 
 /* --- accessors --------------------------------------------------------------- */
 

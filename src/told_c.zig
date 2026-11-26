@@ -35,6 +35,12 @@ const Status = enum(c_int) {
     /// A null pointer where one was required.
     invalid_argument = 12,
     unexpected = 13,
+    /// `told_read_frame` only: the stream ended cleanly, between frames.
+    end_of_stream = 14,
+    /// `told_read_frame` only: the read callback reported an error.
+    read_failed = 15,
+    /// `told_read_frame` only: the frame does not fit the caller's buffer.
+    frame_too_large = 16,
 };
 
 fn statusFor(err: anyerror) Status {
@@ -114,6 +120,86 @@ export fn told_frame_size(bytes: ?[*]const u8, len: usize, out: ?*usize) callcon
 export fn told_validate(bytes: ?[*]const u8, len: usize, max_depth: usize) callconv(.c) Status {
     const src = bytes orelse return .invalid_argument;
     _ = told.validate(src[0..len], max_depth) catch |err| return statusFor(err);
+    return .ok;
+}
+
+// ---------------------------------------------------------------- stream reading
+//
+// `readFrame` takes a std.Io.Reader and an allocator, neither of which C has. The C shape
+// is a read callback and a caller-owned buffer: no allocation, and the frame borrows the
+// buffer exactly as `told_decode`'s borrows its input.
+
+/// Mirrors told_read_fn: fill up to `len` bytes of `dst`, returning the count (short reads
+/// are fine), 0 at end of stream, or a negative value on error.
+const ReadFn = *const fn (ctx: ?*anyopaque, dst: [*]u8, len: usize) callconv(.c) isize;
+
+const FillError = error{ EndOfStream, ReadFailed };
+
+/// Call `read` until `dst` is full. Never asks for more than `dst.len`, which is what keeps
+/// the reader from consuming any byte past the current frame.
+fn fill(read: ReadFn, ctx: ?*anyopaque, dst: []u8) FillError!void {
+    var got: usize = 0;
+    while (got < dst.len) {
+        const n = read(ctx, dst[got..].ptr, dst.len - got);
+        if (n < 0) return error.ReadFailed;
+        if (n == 0) return error.EndOfStream;
+        // A callback claiming more than it was asked for has already written past `dst`;
+        // the least that can be done is not to believe it.
+        if (@as(usize, @intCast(n)) > dst.len - got) return error.ReadFailed;
+        got += @intCast(n);
+    }
+}
+
+/// End of stream once the header byte is in is a frame cut short, not a clean end.
+fn midFrame(err: FillError) Status {
+    return switch (err) {
+        error.EndOfStream => .truncated,
+        error.ReadFailed => .read_failed,
+    };
+}
+
+/// Read exactly one frame into `buf` and decode it. At most `cap` bytes are written, and
+/// no byte past the frame is requested, so the next call starts on the next header and the
+/// stream is left positioned for whatever else shares it.
+///
+/// After `frame_too_large`, `read_failed` or `truncated` the stream is mid-frame, and
+/// there is no way back into step short of the application's own framing: close it.
+export fn told_read_frame(
+    read: ?ReadFn,
+    ctx: ?*anyopaque,
+    buf: ?[*]u8,
+    cap: usize,
+    out: ?*Frame,
+) callconv(.c) Status {
+    const read_fn = read orelse return .invalid_argument;
+    const dst = out orelse return .invalid_argument;
+    const ptr = buf orelse return .invalid_argument;
+    if (cap == 0) return .invalid_argument;
+    const b = ptr[0..cap];
+
+    // End of stream before the header byte is the clean case: the peer stopped between
+    // frames, which is how a stream of frames normally ends.
+    fill(read_fn, ctx, b[0..1]) catch |err| return switch (err) {
+        error.EndOfStream => .end_of_stream,
+        error.ReadFailed => .read_failed,
+    };
+
+    var have: usize = 1;
+    const total = while (true) {
+        const size = told.frameSize(b[0..have]) catch |err| return statusFor(err);
+        if (size) |n| break n;
+        // Only a long length field leaves the size open: MOD 8..15 is 1..8 more bytes.
+        const need = 1 + @as(usize, told.Header.parse(b[0]).mod) - 7;
+        if (need > cap) return .frame_too_large;
+        fill(read_fn, ctx, b[have..need]) catch |err| return midFrame(err);
+        have = need;
+    };
+
+    if (total > cap) return .frame_too_large;
+    fill(read_fn, ctx, b[have..total]) catch |err| return midFrame(err);
+
+    const frame = told.decode(b[0..total]) catch |err| return statusFor(err);
+    dst.* = toCFrame(frame);
     return .ok;
 }
 
@@ -403,6 +489,9 @@ export fn told_status_name(status: Status) callconv(.c) [*:0]const u8 {
         .incomplete => "incomplete",
         .invalid_argument => "invalid argument",
         .unexpected => "unexpected",
+        .end_of_stream => "end of stream",
+        .read_failed => "read failed",
+        .frame_too_large => "frame too large",
     };
 }
 

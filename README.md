@@ -86,8 +86,25 @@ while (try it.next()) |kv| std.debug.print("{s}\n", .{kv.key});
 
 Link `libtold` and include `told.h` (C, `told_*` functions) or `told.hpp` (C++20,
 `namespace told`). See `examples/` — `told_demo.c` and `told_demo.cpp` walk the whole API,
-`told_map.c` and `told_map.cpp` show struct mapping. Run any of them with
-`zig build told-demo-c` and so on.
+`told_map.c` and `told_map.cpp` show struct mapping, `told_stream.c` reads frames off a
+stream. Run any of them with `zig build told-demo-c` and so on.
+
+To read frames off a socket, pipe or file, `told_read_frame` takes a read callback and a
+buffer you own. It reads exactly one frame, never a byte past it, and allocates nothing:
+
+```c
+static ptrdiff_t fd_read(void *ctx, uint8_t *dst, size_t len) {
+    return read(*(int *)ctx, dst, len);
+}
+
+uint8_t buf[64 * 1024];
+told_frame frame;
+told_status s;
+while ((s = told_read_frame(fd_read, &fd, buf, sizeof buf, &frame)) == TOLD_OK) {
+    /* frame borrows buf until the next call */
+}
+/* TOLD_END_OF_STREAM is the clean end; anything else leaves the stream mid-frame */
+```
 
 A downstream Zig library that exposes TOLD frames through its own C ABI should import the
 `told_abi` module for the `told_frame` layout rather than `told_c.zig`, so the `told_*`
