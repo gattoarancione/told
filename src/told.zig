@@ -743,6 +743,7 @@ fn writeJsonString(allocator: Allocator, out: *std.ArrayList(u8), s: []const u8)
 
 test {
     _ = @import("./told.test.zig");
+    _ = @import("./told.fuzz.zig");
 }
 
 // ---------------------------------------------------------------- struct mapping

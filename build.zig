@@ -14,7 +14,7 @@ pub fn build(b: *Build) void {
     //     exe_mod.addImport("told", told.module("told"));
     //
     // It needs no libc and no allocator beyond the one the caller passes to `Encoder`.
-    const told_mod = b.addModule("told", .{
+    _ = b.addModule("told", .{
         .root_source_file = b.path("src/told.zig"),
         .target = target,
         .optimize = optimize,
@@ -53,8 +53,21 @@ pub fn build(b: *Build) void {
 
     const test_step = b.step("test", "Run the Zig tests and the C/C++ checks");
 
-    const unit_tests = b.addTest(.{ .root_module = told_mod });
+    // The Zig tests get a module of their own rather than `told_mod`, so the fuzzer's
+    // options import does not leak to consumers of the `told` module. Every `zig build test`
+    // runs 10K mutational fuzz inputs from a fixed seed; `zig build fuzz` runs more.
+    const unit_tests = b.addTest(.{ .root_module = toldTestModule(b, target, optimize, 10_000, 0) });
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
+
+    // ReleaseSafe whatever -Doptimize says: the safety checks are what turn a bad input into
+    // a caught panic, and the speed is what makes millions of inputs practical.
+    const fuzz_iterations = b.option(u64, "fuzz-iterations", "Inputs for `zig build fuzz` (default 1M)") orelse 1_000_000;
+    const fuzz_seed = b.option(u64, "fuzz-seed", "Seed for `zig build fuzz`; vary it to explore (default 1)") orelse 1;
+    const fuzz_tests = b.addTest(.{
+        .root_module = toldTestModule(b, target, .ReleaseSafe, fuzz_iterations, fuzz_seed),
+        .filters = &.{"mutational fuzz"},
+    });
+    b.step("fuzz", "Run the mutational fuzzer on decode and validate").dependOn(&b.addRunArtifact(fuzz_tests).step);
 
     // The C and C++ programs are the only thing that checks the hand-written headers
     // against the exports -- a mismatch there is invisible from Zig -- so every one of them
@@ -119,4 +132,23 @@ pub fn build(b: *Build) void {
     const wheel_test = b.addSystemCommand(&.{ "python3", "python/verify_wheel.py" });
     wheel_test.step.dependOn(&wheel.step);
     b.step("wheel-test", "Install the wheel in a venv and run the test from it").dependOn(&wheel_test.step);
+}
+
+fn toldTestModule(
+    b: *Build,
+    target: Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    fuzz_iterations: u64,
+    fuzz_seed: u64,
+) *Build.Module {
+    const options = b.addOptions();
+    options.addOption(u64, "iterations", fuzz_iterations);
+    options.addOption(u64, "seed", fuzz_seed);
+    const mod = b.createModule(.{
+        .root_source_file = b.path("src/told.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    mod.addOptions("fuzz_options", options);
+    return mod;
 }

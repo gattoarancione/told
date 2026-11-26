@@ -155,6 +155,7 @@ checkout the package finds `zig-out/lib` on its own; `TOLD_LIBRARY` overrides th
 ```
 src/told.zig         the codec: Frame, decode, validate, Encoder, readFrame, pack/unpack
 src/told.test.zig    its tests
+src/told.fuzz.zig    fuzz tests for decode and validate
 src/told_c.zig       the C ABI (root of libtold)
 src/told_abi.zig     the C frame layout, no exports
 src/told_alloc.zig   the C ABI's allocator, chosen by build mode
@@ -176,6 +177,21 @@ The C and C++ tests use `tests/harness.h`, under a hundred lines, rather than a 
 so the tests need nothing the library does not and cross-compile with it. The byte
 vectors they check are the ones the Zig tests pin, and all four languages decode and
 re-encode `src/testdata/interop.tld`, so they cannot drift apart without a test failing.
+
+`decode` and `validate`, the functions that take untrusted bytes, are fuzzed by
+`src/told.fuzz.zig`, which checks properties rather than examples. Decoded frames must lie
+inside the input, `frameSize` must agree with `decode`, nothing may trap, whatever
+`validate` accepts must walk, stringify and re-encode to the same values, and the encoder's
+own output must always validate. `zig build test` runs 10K inputs from a fixed seed;
+for a longer run:
+
+```sh
+zig build fuzz -Dfuzz-iterations=10000000 -Dfuzz-seed=7   # ReleaseSafe, ~100K inputs/s
+```
+
+A failure prints the seed, iteration and input bytes. Coverage-guided fuzzing through
+`zig build test --fuzz` is wired up too, but Zig 0.16.0's test runner does not compile
+with `-ffuzz`, so until that is fixed upstream the mutational fuzzer above is the one to run.
 
 ## License
 
