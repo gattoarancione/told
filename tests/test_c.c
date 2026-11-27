@@ -416,6 +416,42 @@ static void test_a_mark_past_the_end_is_refused(void) {
     EXPECT_BYTES(encoded(&len), len, 0x00); /* and the buffer is untouched */
 }
 
+static void test_a_mark_that_is_no_open_container_is_refused(void) {
+    told_encoder_reset(enc);
+    told_write_string(enc, (const uint8_t *)"hi", 2);
+    told_write_buffer(enc, (const uint8_t[]){0x05}, 1);
+    CHECK(told_end_array(enc, 0) == TOLD_INVALID_ARGUMENT);  /* a STRING header */
+    CHECK(told_end_object(enc, 4) == TOLD_INVALID_ARGUMENT); /* 5 bytes would run past the end */
+    size_t len;
+    EXPECT_BYTES(encoded(&len), len, 0x92, 'h', 'i', 0xC1, 0x05);
+}
+
+static void test_a_reused_encoder_writes_the_same_bytes(void) {
+    /* The second message is encoded with the header sizes learnt from the first. */
+    uint8_t first[512];
+    size_t first_len = 0;
+    for (int round = 0; round < 2; round++) {
+        told_encoder_reset(enc);
+        size_t obj, arr;
+        told_begin_object(enc, &obj);
+        told_write_string(enc, (const uint8_t *)"readings", 8);
+        told_begin_array(enc, &arr);
+        for (int k = 0; k < 40; k++) told_write_u64(enc, 1000u + (uint64_t)k);
+        CHECK(told_end_array(enc, arr) == TOLD_OK);
+        CHECK(told_end_object(enc, obj) == TOLD_OK);
+        size_t len;
+        const uint8_t *bytes = encoded(&len);
+        CHECK(told_validate(bytes, len, 8) == TOLD_OK);
+        if (round == 0) {
+            CHECK(len <= sizeof first);
+            memcpy(first, bytes, len);
+            first_len = len;
+        } else {
+            CHECK(len == first_len && memcmp(first, bytes, len) == 0);
+        }
+    }
+}
+
 static void test_every_status_has_a_name(void) {
     for (int s = TOLD_OK; s <= TOLD_OUT_OF_RANGE; s++) {
         const char *name = told_status_name((told_status)s);
@@ -674,6 +710,8 @@ int main(void) {
     RUN(test_reset_keeps_the_handle_usable);
     RUN(test_null_arguments_are_a_status_never_a_crash);
     RUN(test_a_mark_past_the_end_is_refused);
+    RUN(test_a_mark_that_is_no_open_container_is_refused);
+    RUN(test_a_reused_encoder_writes_the_same_bytes);
     RUN(test_every_status_has_a_name);
     RUN(test_struct_packs_as_an_object_keyed_by_name);
     RUN(test_struct_packs_positionally);

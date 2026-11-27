@@ -452,6 +452,14 @@ fn writeVarPrefix(out: *[9]u8, t: Type, len: usize) usize {
 pub const Encoder = struct {
     allocator: Allocator,
     out: *std.ArrayList(u8),
+    /// Containers open right now; picks the entry of `reserve` a new one uses.
+    depth: usize = 0,
+    /// Header bytes to reserve for the next container opened at each nesting depth: what
+    /// the last container closed there needed. See `beginArray`. Two to start with, right
+    /// for 8 to 255 bytes, the size most structs and messages come in.
+    reserve: [reserve_levels]u8 = @splat(2),
+
+    const reserve_levels = 8;
 
     pub const WriteError = Allocator.Error || error{InvalidUtf8};
 
@@ -576,22 +584,76 @@ pub const Encoder = struct {
     };
 
     /// Containers need L before the header can be written (section 7) but only know it
-    /// afterwards. So children are appended first and the header is inserted in front
-    /// of them at `end` — one memmove, versus encoding children into a scratch buffer
-    /// and copying them in.
-    pub fn beginArray(e: *Encoder) Mark {
-        return .{ .start = e.out.items.len, .type = .array };
+    /// once their children are. So `begin*` reserves room for the header, guessing its
+    /// size, and `end` writes it there. A right guess costs no copy at all; a wrong one
+    /// slides the children by the difference, so the output is always the minimal
+    /// encoding. The guess is what the previous container at the same depth needed,
+    /// which an array of similar structs, or the next message from a reused encoder,
+    /// gets right, so keep one encoder per stream rather than one per message. The
+    /// reservation's first byte records its size, so `end` needs only the mark.
+    pub fn beginArray(e: *Encoder) Allocator.Error!Mark {
+        return e.begin(.array);
     }
 
-    pub fn beginObject(e: *Encoder) Mark {
-        return .{ .start = e.out.items.len, .type = .object };
+    pub fn beginObject(e: *Encoder) Allocator.Error!Mark {
+        return e.begin(.object);
+    }
+
+    fn begin(e: *Encoder, t: Type) Allocator.Error!Mark {
+        // A container opening an empty list is top-level, whatever an abandoned frame
+        // left `depth` at.
+        if (e.out.items.len == 0) e.depth = 0;
+        const n = e.reserve[@min(e.depth, reserve_levels - 1)];
+        const start = e.out.items.len;
+        // The bytes after the first are overwritten by `end` before anyone reads them.
+        if (e.out.capacity - start < n) try e.out.ensureUnusedCapacity(e.allocator, n);
+        e.out.items.len += n;
+        e.out.items[start] = n;
+        e.depth += 1;
+        return .{ .start = start, .type = t };
+    }
+
+    /// Whether `mark` can be passed to `end`: a check for marks from untrusted callers
+    /// (the C ABI), which `end` itself does not make.
+    pub fn isOpen(e: *const Encoder, mark: Mark) bool {
+        if (mark.start >= e.out.items.len) return false;
+        const n = e.out.items[mark.start];
+        return n >= 1 and n <= 9 and n <= e.out.items.len - mark.start;
     }
 
     pub fn end(e: *Encoder, mark: Mark) Allocator.Error!void {
-        const len = e.out.items.len - mark.start;
+        const items = e.out.items;
+        const reserved = items[mark.start];
+        const len = items.len - mark.start - reserved;
+        e.depth -|= 1;
+        const level = @min(e.depth, reserve_levels - 1);
+
+        // The common case, a short container whose one-byte header was guessed right,
+        // kept small enough to inline; the rest is out of line.
+        if (reserved == 1 and len <= 7) {
+            items[mark.start] = headerByte(mark.type, @intCast(len));
+            e.reserve[level] = 1;
+        } else {
+            e.reserve[level] = try e.placeHeader(mark, reserved, len);
+        }
+    }
+
+    /// Writes the header of an `len`-byte container into the `reserved` bytes at `mark`,
+    /// sliding the children when the header needs more or fewer. Returns its size.
+    noinline fn placeHeader(e: *Encoder, mark: Mark, reserved: u8, len: usize) Allocator.Error!u8 {
         var prefix: [9]u8 = undefined;
         const n = writeVarPrefix(&prefix, mark.type, len);
-        try e.out.insertSlice(e.allocator, mark.start, prefix[0..n]);
+        const body = mark.start + reserved;
+        if (n > reserved) {
+            // Any n - reserved bytes will do: they are overwritten below.
+            try e.out.insertSlice(e.allocator, body, prefix[0 .. n - reserved]);
+        } else if (n < reserved) {
+            const items = e.out.items;
+            std.mem.copyForwards(u8, items[mark.start + n ..], items[body..]);
+            e.out.shrinkRetainingCapacity(items.len - (reserved - n));
+        }
+        @memcpy(e.out.items[mark.start..][0..n], prefix[0..n]);
+        return @intCast(n);
     }
 
     /// An object key. Same frame as any STRING; named for readability at call sites.
@@ -825,7 +887,7 @@ pub fn pack(e: *Encoder, value: anytype) PackError!void {
             .one => return pack(e, value.*),
             .slice => {
                 if (ptr.child == u8) return e.writeString(value);
-                const mark = e.beginArray();
+                const mark = try e.beginArray();
                 for (value) |item| try pack(e, item);
                 return e.end(mark);
             },
@@ -834,7 +896,7 @@ pub fn pack(e: *Encoder, value: anytype) PackError!void {
 
         .array => |arr| {
             if (arr.child == u8) return e.writeString(&value);
-            const mark = e.beginArray();
+            const mark = try e.beginArray();
             for (value) |item| try pack(e, item);
             return e.end(mark);
         },
@@ -843,11 +905,11 @@ pub fn pack(e: *Encoder, value: anytype) PackError!void {
             // A tuple is positional by nature, so it becomes an array; a named struct
             // carries its field names into the object.
             if (st.is_tuple) {
-                const mark = e.beginArray();
+                const mark = try e.beginArray();
                 inline for (st.fields) |f| try pack(e, @field(value, f.name));
                 return e.end(mark);
             }
-            const mark = e.beginObject();
+            const mark = try e.beginObject();
             inline for (st.fields) |f| {
                 try e.writeKey(f.name);
                 try pack(e, @field(value, f.name));
@@ -857,7 +919,7 @@ pub fn pack(e: *Encoder, value: anytype) PackError!void {
 
         .@"union" => |un| {
             if (un.tag_type == null) @compileError("told.pack: untagged union " ++ @typeName(T));
-            const mark = e.beginObject();
+            const mark = try e.beginObject();
             switch (value) {
                 inline else => |payload, tag| {
                     try e.writeKey(@tagName(tag));
@@ -1017,7 +1079,8 @@ fn dupeMaybe(bytes: []const u8, allocator: ?Allocator) Allocator.Error![]const u
 }
 
 /// Pack `value` into `out`, which is cleared first. The convenience form of `pack` for
-/// callers that just want the bytes.
+/// callers that just want the bytes; a stream of large or deep messages encodes faster
+/// through one long-lived `Encoder` and `pack` (see `Encoder.beginArray`).
 pub fn packTo(allocator: Allocator, out: *std.ArrayList(u8), value: anytype) PackError!void {
     out.clearRetainingCapacity();
     var e = Encoder.init(allocator, out);

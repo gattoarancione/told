@@ -343,13 +343,17 @@ export fn told_object_next(
 /// The encoder is the one piece with state, so it crosses as an opaque handle. It owns
 /// its buffer; the caller borrows the bytes via `told_encoder_bytes` and must copy
 /// them before the next write, since appending may reallocate.
+/// `enc` lives here rather than being rebuilt per call so that its container header
+/// guesses carry over from one call, and one message, to the next.
 const Encoder = struct {
     list: std.ArrayList(u8),
+    enc: told.Encoder,
 };
 
 export fn told_encoder_create() callconv(.c) ?*Encoder {
     const enc = allocator.create(Encoder) catch return null;
-    enc.* = .{ .list = .empty };
+    enc.* = .{ .list = .empty, .enc = undefined };
+    enc.enc = told.Encoder.init(allocator, &enc.list);
     return enc;
 }
 
@@ -359,7 +363,8 @@ export fn told_encoder_destroy(handle: ?*Encoder) callconv(.c) void {
     allocator.destroy(enc);
 }
 
-/// Drop the contents, keeping the capacity — for reusing one encoder per message.
+/// Drop the contents, keeping the capacity and the learnt header sizes — for reusing one
+/// encoder per message.
 export fn told_encoder_reset(handle: ?*Encoder) callconv(.c) void {
     const enc = handle orelse return;
     enc.list.clearRetainingCapacity();
@@ -371,43 +376,43 @@ export fn told_encoder_bytes(handle: ?*const Encoder, len: ?*usize) callconv(.c)
     return enc.list.items.ptr;
 }
 
-fn writer(handle: ?*Encoder) ?told.Encoder {
+fn writer(handle: ?*Encoder) ?*told.Encoder {
     const enc = handle orelse return null;
-    return told.Encoder.init(allocator, &enc.list);
+    return &enc.enc;
 }
 
 export fn told_write_null(handle: ?*Encoder) callconv(.c) Status {
-    var enc = writer(handle) orelse return .invalid_argument;
+    const enc = writer(handle) orelse return .invalid_argument;
     enc.writeNull() catch |err| return statusFor(err);
     return .ok;
 }
 
 export fn told_write_bool(handle: ?*Encoder, value: bool) callconv(.c) Status {
-    var enc = writer(handle) orelse return .invalid_argument;
+    const enc = writer(handle) orelse return .invalid_argument;
     enc.writeBool(value) catch |err| return statusFor(err);
     return .ok;
 }
 
 export fn told_write_u64(handle: ?*Encoder, value: u64) callconv(.c) Status {
-    var enc = writer(handle) orelse return .invalid_argument;
+    const enc = writer(handle) orelse return .invalid_argument;
     enc.writeUint(value) catch |err| return statusFor(err);
     return .ok;
 }
 
 export fn told_write_i64(handle: ?*Encoder, value: i64) callconv(.c) Status {
-    var enc = writer(handle) orelse return .invalid_argument;
+    const enc = writer(handle) orelse return .invalid_argument;
     enc.writeInt(value) catch |err| return statusFor(err);
     return .ok;
 }
 
 export fn told_write_f32(handle: ?*Encoder, value: f32) callconv(.c) Status {
-    var enc = writer(handle) orelse return .invalid_argument;
+    const enc = writer(handle) orelse return .invalid_argument;
     enc.writeFloat32(value) catch |err| return statusFor(err);
     return .ok;
 }
 
 export fn told_write_f64(handle: ?*Encoder, value: f64) callconv(.c) Status {
-    var enc = writer(handle) orelse return .invalid_argument;
+    const enc = writer(handle) orelse return .invalid_argument;
     enc.writeFloat64(value) catch |err| return statusFor(err);
     return .ok;
 }
@@ -428,21 +433,21 @@ fn inputSlice(bytes: ?[*]const u8, len: usize) ?[]const u8 {
 
 /// Rejects invalid UTF-8 rather than emitting a STRING a decoder is entitled to refuse.
 export fn told_write_string(handle: ?*Encoder, bytes: ?[*]const u8, len: usize) callconv(.c) Status {
-    var enc = writer(handle) orelse return .invalid_argument;
+    const enc = writer(handle) orelse return .invalid_argument;
     const src = inputSlice(bytes, len) orelse return .invalid_argument;
     enc.writeString(src) catch |err| return statusFor(err);
     return .ok;
 }
 
 export fn told_write_buffer(handle: ?*Encoder, bytes: ?[*]const u8, len: usize) callconv(.c) Status {
-    var enc = writer(handle) orelse return .invalid_argument;
+    const enc = writer(handle) orelse return .invalid_argument;
     const src = inputSlice(bytes, len) orelse return .invalid_argument;
     enc.writeBuffer(src) catch |err| return statusFor(err);
     return .ok;
 }
 
 export fn told_write_extended(handle: ?*Encoder, code: u8, bytes: ?[*]const u8, len: usize) callconv(.c) Status {
-    var enc = writer(handle) orelse return .invalid_argument;
+    const enc = writer(handle) orelse return .invalid_argument;
     const src = inputSlice(bytes, len) orelse return .invalid_argument;
     enc.writeExtended(code, src) catch |err| return statusFor(err);
     return .ok;
@@ -452,31 +457,32 @@ export fn told_write_extended(handle: ?*Encoder, code: u8, bytes: ?[*]const u8, 
 // inserted at the end. The mark is just the offset where the container started — a plain
 // size_t in C, with separate array/object closers so the type cannot be lost.
 export fn told_begin_array(handle: ?*Encoder, mark: ?*usize) callconv(.c) Status {
-    var enc = writer(handle) orelse return .invalid_argument;
+    const enc = writer(handle) orelse return .invalid_argument;
     const m = mark orelse return .invalid_argument;
-    m.* = enc.beginArray().start;
+    m.* = (enc.beginArray() catch |err| return statusFor(err)).start;
     return .ok;
 }
 
 export fn told_begin_object(handle: ?*Encoder, mark: ?*usize) callconv(.c) Status {
-    var enc = writer(handle) orelse return .invalid_argument;
+    const enc = writer(handle) orelse return .invalid_argument;
     const m = mark orelse return .invalid_argument;
-    m.* = enc.beginObject().start;
+    m.* = (enc.beginObject() catch |err| return statusFor(err)).start;
     return .ok;
 }
 
 export fn told_end_array(handle: ?*Encoder, mark: usize) callconv(.c) Status {
-    var enc = writer(handle) orelse return .invalid_argument;
-    // A mark past the end would underflow the length below: a trap in safe builds and
-    // undefined behaviour in fast ones, where C callers are owed a status.
-    if (mark > enc.out.items.len) return .invalid_argument;
+    const enc = writer(handle) orelse return .invalid_argument;
+    // A mark that is not an open container would send `end` outside the buffer: a trap
+    // in safe builds and undefined behaviour in fast ones, where C callers are owed a
+    // status.
+    if (!enc.isOpen(.{ .start = mark, .type = .array })) return .invalid_argument;
     enc.end(.{ .start = mark, .type = .array }) catch |err| return statusFor(err);
     return .ok;
 }
 
 export fn told_end_object(handle: ?*Encoder, mark: usize) callconv(.c) Status {
-    var enc = writer(handle) orelse return .invalid_argument;
-    if (mark > enc.out.items.len) return .invalid_argument;
+    const enc = writer(handle) orelse return .invalid_argument;
+    if (!enc.isOpen(.{ .start = mark, .type = .object })) return .invalid_argument;
     enc.end(.{ .start = mark, .type = .object }) catch |err| return statusFor(err);
     return .ok;
 }
@@ -663,7 +669,7 @@ fn packField(enc: *told.Encoder, field: *const FieldDesc, base: ?*const anyopaqu
             try packStruct(enc, desc, @ptrCast(ptr));
         },
         .array => {
-            const mark = enc.beginArray();
+            const mark = try enc.beginArray();
             var i: usize = 0;
             while (i < field.count) : (i += 1) {
                 const element = ptr + i * field.element_size;
@@ -726,7 +732,7 @@ fn packStruct(enc: *told.Encoder, desc: *const StructDesc, value: ?*const anyopa
     const fields = desc.fields orelse return error.InvalidArgument;
 
     if (desc.named != 0) {
-        const mark = enc.beginObject();
+        const mark = try enc.beginObject();
         var i: usize = 0;
         while (i < desc.field_count) : (i += 1) {
             const field = &fields[i];
@@ -738,7 +744,7 @@ fn packStruct(enc: *told.Encoder, desc: *const StructDesc, value: ?*const anyopa
         return;
     }
 
-    const mark = enc.beginArray();
+    const mark = try enc.beginArray();
     var i: usize = 0;
     while (i < desc.field_count) : (i += 1) {
         try packField(enc, &fields[i], value);
@@ -779,10 +785,10 @@ export fn told_pack_struct(
     desc: ?*const StructDesc,
     value: ?*const anyopaque,
 ) callconv(.c) Status {
-    var enc = writer(handle) orelse return .invalid_argument;
+    const enc = writer(handle) orelse return .invalid_argument;
     const d = desc orelse return .invalid_argument;
     if (value == null) return .invalid_argument;
-    packStruct(&enc, d, value) catch |err| return statusFor(err);
+    packStruct(enc, d, value) catch |err| return statusFor(err);
     return .ok;
 }
 

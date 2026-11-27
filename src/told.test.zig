@@ -353,7 +353,7 @@ test "ARRAY holds concatenated frames and is skippable by L alone" {
     defer out.deinit(allocator);
     var enc = told.Encoder.init(allocator, &out);
 
-    const mark = enc.beginArray();
+    const mark = try enc.beginArray();
     try enc.writeUint(1);
     try enc.writeBool(true);
     try enc.writeString("hi");
@@ -379,9 +379,9 @@ test "empty ARRAY and OBJECT are one byte" {
     defer out.deinit(allocator);
     var enc = told.Encoder.init(allocator, &out);
 
-    const a = enc.beginArray();
+    const a = try enc.beginArray();
     try enc.end(a);
-    const o = enc.beginObject();
+    const o = try enc.beginObject();
     try enc.end(o);
 
     try testing.expectEqualSlices(u8, &.{ 0xA0, 0xB0 }, out.items);
@@ -392,13 +392,13 @@ test "OBJECT preserves key order and nests" {
     defer out.deinit(allocator);
     var enc = told.Encoder.init(allocator, &out);
 
-    const obj = enc.beginObject();
+    const obj = try enc.beginObject();
     try enc.writeKey("topic");
     try enc.writeString("test/topic-a");
     try enc.writeKey("seq");
     try enc.writeUint(4242);
     try enc.writeKey("tags");
-    const arr = enc.beginArray();
+    const arr = try enc.beginArray();
     try enc.writeString("a");
     try enc.writeString("b");
     try enc.end(arr);
@@ -439,7 +439,7 @@ test "duplicate object keys are the encoding's business to allow" {
     defer out.deinit(allocator);
     var enc = told.Encoder.init(allocator, &out);
 
-    const obj = enc.beginObject();
+    const obj = try enc.beginObject();
     try enc.writeKey("k");
     try enc.writeUint(1);
     try enc.writeKey("k");
@@ -456,7 +456,7 @@ test "container larger than the inline limit gets an extended length" {
     defer out.deinit(allocator);
     var enc = told.Encoder.init(allocator, &out);
 
-    const arr = enc.beginArray();
+    const arr = try enc.beginArray();
     for (0..200) |_| try enc.writeUint(7); // 200 one-byte frames
     try enc.end(arr);
 
@@ -555,7 +555,7 @@ test "readFrame pulls one frame at a time across read boundaries" {
     // Three frames back to back, the middle one long enough to need a length field.
     try enc.writeUint(9);
     try enc.writeString("a longer string that needs extended length");
-    const obj = enc.beginObject();
+    const obj = try enc.beginObject();
     try enc.writeKey("k");
     try enc.writeBool(true);
     try enc.end(obj);
@@ -601,9 +601,9 @@ test "validate walks the whole tree" {
     defer out.deinit(allocator);
     var enc = told.Encoder.init(allocator, &out);
 
-    const obj = enc.beginObject();
+    const obj = try enc.beginObject();
     try enc.writeKey("ok");
-    const arr = enc.beginArray();
+    const arr = try enc.beginArray();
     try enc.writeString("fine");
     try enc.end(arr);
     try enc.end(obj);
@@ -624,13 +624,83 @@ test "validate walks the whole tree" {
     try testing.expectError(error.InvalidUtf8, told.validate(&nested_bad, 8));
 }
 
+/// Header bytes the minimal encoding of an L-byte container or string takes.
+fn minimalPrefix(len: usize) usize {
+    if (len <= 7) return 1;
+    var ll: usize = 1;
+    while (ll < 8 and len >> @intCast(8 * ll) != 0) ll += 1;
+    return 1 + ll;
+}
+
+test "container headers come out minimal whatever size was reserved" {
+    // The encoder reserves what the previous container at the same depth needed. So
+    // closing a container of `before` bytes and then one of `after` bytes at depth 1 pits
+    // every guess against every header size: right, too big (the children slide back) and
+    // too small (they slide forward). Each pair runs twice on one encoder, so the second
+    // round's outer array is reserved from the first's.
+    const sizes = [_]usize{ 0, 7, 8, 255, 256, 65535, 65536 };
+    const payload = try allocator.alloc(u8, 65536);
+    defer allocator.free(payload);
+    for (payload, 0..) |*b, i| b.* = @truncate(i *% 31 + 7);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+
+    for (sizes) |before| for (sizes) |after| {
+        var enc = told.Encoder.init(allocator, &out);
+        for (0..2) |_| {
+            out.clearRetainingCapacity();
+            const outer = try enc.beginArray();
+            for ([_]usize{ before, after }) |len| {
+                const inner = try enc.beginArray();
+                // One BUFFER frame of exactly `len` bytes, header included.
+                if (len > 0) try enc.writeBuffer(payload[0 .. len - minimalPrefix(len - 1)]);
+                try enc.end(inner);
+            }
+            try enc.end(outer);
+
+            const frame = try told.validate(out.items, 4);
+            try testing.expectEqual(out.items.len, frame.size());
+            try testing.expectEqual(minimalPrefix(frame.data.len), frame.prefix_len);
+            var it = try frame.arrayIterator();
+            for ([_]usize{ before, after }) |len| {
+                const inner = (try it.next()).?;
+                try testing.expectEqual(minimalPrefix(len), inner.prefix_len);
+                try testing.expectEqual(len, inner.data.len);
+                if (len == 0) continue;
+                var items = try inner.arrayIterator();
+                const buf = try (try items.next()).?.asBuffer();
+                try testing.expectEqualSlices(u8, payload[0..buf.len], buf);
+            }
+            try testing.expectEqual(@as(?told.Frame, null), try it.next());
+        }
+    };
+}
+
+test "a frame abandoned midway does not upset the next one" {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    var enc = told.Encoder.init(allocator, &out);
+
+    _ = try enc.beginObject();
+    _ = try enc.beginArray();
+    try enc.writeUint(1);
+    out.clearRetainingCapacity();
+
+    const arr = try enc.beginArray();
+    try enc.writeUint(1);
+    try enc.end(arr);
+    try testing.expectEqualSlices(u8, &.{ 0xA1, 0x21 }, out.items);
+    try testing.expectEqual(@as(usize, 0), enc.depth);
+}
+
 test "validate enforces a depth limit" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
     var enc = told.Encoder.init(allocator, &out);
 
     var marks: [16]told.Encoder.Mark = undefined;
-    for (0..16) |i| marks[i] = enc.beginArray();
+    for (0..16) |i| marks[i] = try enc.beginArray();
     var i: usize = 16;
     while (i > 0) {
         i -= 1;
@@ -648,7 +718,7 @@ test "stringify renders a frame for humans" {
     defer out.deinit(allocator);
     var enc = told.Encoder.init(allocator, &out);
 
-    const obj = enc.beginObject();
+    const obj = try enc.beginObject();
     try enc.writeKey("seq");
     try enc.writeUint(7);
     try enc.writeKey("live");
@@ -675,7 +745,7 @@ test "stringify escapes strings and keys" {
     defer out.deinit(allocator);
     var enc = told.Encoder.init(allocator, &out);
 
-    const obj = enc.beginObject();
+    const obj = try enc.beginObject();
     try enc.writeKey("a\"b");
     try enc.writeString("line\n\"quoted\" \\ tab\t bell\x07 é");
     try enc.end(obj);
@@ -695,7 +765,7 @@ test "encoder byte counts match the spec's compactness claims" {
     var enc = told.Encoder.init(allocator, &out);
 
     // A small object: {"a":1,"b":true} in 8 bytes.
-    const obj = enc.beginObject();
+    const obj = try enc.beginObject();
     try enc.writeKey("a");
     try enc.writeUint(1);
     try enc.writeKey("b");
@@ -798,7 +868,7 @@ test "an unknown key is ignored and a missing field uses its default" {
 
     // What a newer producer sends: an extra field, and `valid` left out.
     var e = told.Encoder.init(testing.allocator, &buf);
-    const obj = e.beginObject();
+    const obj = try e.beginObject();
     try e.writeKey("channel");
     try e.writeUint(4);
     try e.writeKey("value");
@@ -818,7 +888,7 @@ test "a missing field with no default is an error, not a guess" {
     defer buf.deinit(testing.allocator);
 
     var e = told.Encoder.init(testing.allocator, &buf);
-    const obj = e.beginObject();
+    const obj = try e.beginObject();
     try e.writeKey("channel");
     try e.writeUint(4);
     try e.end(obj); // `value` has no default

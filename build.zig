@@ -23,6 +23,20 @@ pub fn build(b: *Build) void {
         .optimize = optimize,
     });
 
+    // ReleaseFast whatever -Doptimize says: a benchmark of a debug build measures the checks.
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("bench/encode.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    bench_mod.addImport("told", b.createModule(.{
+        .root_source_file = b.path("src/told.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    }));
+    const bench = b.addExecutable(.{ .name = "bench-encode", .root_module = bench_mod });
+    b.step("bench", "Benchmark the encoder (ReleaseFast)").dependOn(&b.addRunArtifact(bench).step);
+
     // The C frame layout and nothing else. A downstream library that hands TOLD frames to
     // its own C callers imports this instead of told_c.zig, so the two archives do not both
     // carry the told_* exports. See src/told_abi.zig.

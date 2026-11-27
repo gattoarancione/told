@@ -221,8 +221,11 @@ told_status told_write_buffer(told_encoder *enc, const uint8_t *bytes, size_t le
 told_status told_write_extended(told_encoder *enc, uint8_t code,
                                         const uint8_t *bytes, size_t len);
 
-/* A container's length is only known once its children are written, so its header is
- * inserted on close. Pass the mark from begin_* to the matching end_*. */
+/* A container's length is only known once its children are written, so begin_* reserves
+ * room for its header and end_* fills it in, sliding the children only when the header
+ * needs a different size than the previous container at the same depth did. Reusing
+ * one encoder across messages (told_encoder_reset) keeps those sizes learnt. Pass the
+ * mark from begin_* to the matching end_*; any other value is TOLD_INVALID_ARGUMENT. */
 told_status told_begin_array(told_encoder *enc, size_t *mark);
 told_status told_begin_object(told_encoder *enc, size_t *mark);
 told_status told_end_array(told_encoder *enc, size_t mark);

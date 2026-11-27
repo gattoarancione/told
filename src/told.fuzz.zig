@@ -173,12 +173,21 @@ fn checkValidate(allocator: std.mem.Allocator, input: []const u8) !void {
     const canonical = try told.validate(first.items, max_depth);
     try expectSameValue(frame, canonical);
 
-    // ...and that form is a fixed point: encoding it again changes nothing.
+    // ...and that form is a fixed point: encoding it again changes nothing, whether the
+    // encoder starts from its default container header guesses...
     var second: std.ArrayList(u8) = .empty;
     defer second.deinit(allocator);
     var enc2 = told.Encoder.init(allocator, &second);
     try reencode(&enc2, canonical);
     try testing.expectEqualSlices(u8, first.items, second.items);
+
+    // ...or from the ones the first pass left behind.
+    var third: std.ArrayList(u8) = .empty;
+    defer third.deinit(allocator);
+    var enc3 = enc;
+    enc3.out = &third;
+    try reencode(&enc3, canonical);
+    try testing.expectEqualSlices(u8, first.items, third.items);
 }
 
 fn walk(frame: told.Frame, depth_left: usize) !void {
@@ -228,13 +237,13 @@ fn reencode(enc: *told.Encoder, frame: told.Frame) !void {
         .string => try enc.writeString(try frame.asString()),
         .buffer => try enc.writeBuffer(try frame.asBuffer()),
         .array => {
-            const mark = enc.beginArray();
+            const mark = try enc.beginArray();
             var it = try frame.arrayIterator();
             while (try it.next()) |child| try reencode(enc, child);
             try enc.end(mark);
         },
         .object => {
-            const mark = enc.beginObject();
+            const mark = try enc.beginObject();
             var it = try frame.objectIterator();
             while (try it.next()) |pair| {
                 try enc.writeKey(pair.key);
@@ -458,13 +467,13 @@ const Gen = struct {
                 gen.saw_extended = true;
             },
             9 => {
-                const mark = enc.beginArray();
+                const mark = try enc.beginArray();
                 var n = random.uintAtMost(usize, 6);
                 while (n > 0) : (n -= 1) try gen.value(enc, depth - 1);
                 try enc.end(mark);
             },
             else => {
-                const mark = enc.beginObject();
+                const mark = try enc.beginObject();
                 var n = random.uintAtMost(usize, 5);
                 while (n > 0) : (n -= 1) {
                     try enc.writeKey(genString(random, &text));

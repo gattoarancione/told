@@ -39,21 +39,22 @@ an old decoder would silently read any new meaning there as null.
 | # | Change | Gain |
 |---|---|---|
 | 7 | **Float64 narrowing**, the remainder of the original #7: write a float64 exactly representable as float32 as one, when that is shorter. Trailing-zero floats (done in 1.1) already captured most of the gain; narrowing still saves a byte on values like `21.5` (`83 40 35 80` → `72 41 AC`). It changes the declared type, so readers that insist on FLOAT64 need to accept either | Occasionally one more byte |
-| 8 | **No memmove on container close**: `end()` currently shifts the container's whole contents to insert its header. Reserve the header space up front, or add `beginArray(len)` for callers that know the count | Nested containers stop costing depth × size in moves |
+| 8 | ~~**No memmove on container close**~~ — done. `begin*` reserves the header size the previous container at the same depth needed, and `end` fills it in, sliding the children only on a wrong guess; output is byte-identical. With a reused encoder, a 1 MiB buffer three deep encodes 4.8× faster and 64-deep nesting 5.8×, and small containers are no slower (`zig build bench`) | Nested containers no longer cost depth × size in moves |
 | 9 | **Python decodes in one call**: `told.loads` crosses into C several times per value, which its own docstring calls fine for messages but not for megabytes. One call returning a flat token list would end that | Large-frame decoding in Python, by an estimated order of magnitude; to be measured |
 | 10 | **SIMD UTF-8 validation** in `validate` and `asString` | Faster text-heavy frames |
 | 11 | **Canonical mode**, with optionally sorted keys | Stable bytes for hashing and deduplication; the fuzz tests already prove the encoder's output is a fixed point |
 
 ## Suggested order
 
-1. **#8.** No compatibility risk, measurable gains, and the fuzzers and the four-language
-   golden frame catch any regression. (Trailing-zero floats, the bulk of #7, shipped in
-   1.1: the golden frame went from 151 to 127 bytes.)
-2. **#5.** Backward-compatible, and removes the only frame nothing can skip.
-3. **Decide what `0xD` and `0xE` are for.** The recommendation: `0xD` for typed arrays (#1),
+Done so far: trailing-zero floats, the bulk of #7, in 1.1 (the golden frame went from
+151 to 127 bytes), and #8.
+
+1. **#5.** Backward-compatible, and removes the only frame nothing can skip.
+2. **Decide what `0xD` and `0xE` are for.** The recommendation: `0xD` for typed arrays (#1),
    the best fit for qnnt's sensor payloads, and `0xE` for integers that #2 and #3 share —
    unsigned in MOD 0–8, small negatives in the MOD values left over.
-4. **#4 and #9** once a benchmark shows where the time and bytes go on real payloads.
+3. **#4 and #9** once a benchmark shows where the time and bytes go on real payloads;
+   `zig build bench` covers the encoder so far.
 
 Every wire change ships with a spec bump, new golden frames decoded in all four
 languages, and fuzz-corpus seeds for the new type.

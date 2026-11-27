@@ -78,9 +78,9 @@ defer buf.deinit(gpa);
 try told.packTo(gpa, &buf, Reading{ .sensor = "t1", .seq = 7, .celsius = 21.5 });
 const back = try told.unpackFrom(Reading, buf.items, null); // null: borrow from buf
 
-// Or by hand:
+// Or by hand, keeping `e` for the whole stream: it learns each depth's header size.
 var e = told.Encoder.init(gpa, &buf);
-const obj = e.beginObject();
+const obj = try e.beginObject();
 try e.writeKey("seq");
 try e.writeUint(4242);
 try e.end(obj);
@@ -169,6 +169,7 @@ src/told.fuzz.zig    fuzz tests for decode and validate
 src/told_c.zig       the C ABI (root of libtold)
 src/told_abi.zig     the C frame layout, no exports
 src/told_alloc.zig   the C ABI's allocator, chosen by build mode
+bench/               the encoder benchmark
 src/testdata/        the golden cross-language frame
 include/             told.h, told.hpp
 examples/            C and C++ demos, all run by `zig build test`
@@ -217,6 +218,9 @@ directly (`clang -fsanitize=fuzzer,address -Iinclude tests/fuzz_read_frame.c -lt
 A failure prints the seed, iteration and input bytes. Coverage-guided fuzzing through
 `zig build test --fuzz` is wired up too, but Zig 0.16.0's test runner does not compile
 with `-ffuzz`, so until that is fixed upstream the mutational fuzzer above is the one to run.
+
+`zig build bench` times the encoder on a few shapes, from a 4-field object to a 1 MiB
+buffer nested three deep, with a fresh encoder per frame and with one reused.
 
 ## License
 
